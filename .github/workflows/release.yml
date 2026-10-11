@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # 手动跑一次"只构建、不发版"：产物走 artifact，给人测包用。
+  # 补这个入口是因为 ci.yml 不出包、release.yml 又只在 tag 上出包，于是"发版前想给人
+  # 测包"只剩本地打这一条路——而本地打会把构建机 System32 的 VC++ 运行时原样收进 exe
+  # 并盖过用户自己那份（2026-10 群测两个转写引擎都 0xC0000005 就是这么来的）。
+  # 触发后 publish 这个 job 会被下面的 if 跳过，不会建 Release、不会刷 feed。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Verify tag and application version
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path("launcher.py").read_text(encoding="utf-8")
+          match = re.search(r'^VERSION = "([^"]+)"', source, re.MULTILINE)
+          if match is None:
+              raise SystemExit("Could not read VERSION from launcher.py")
+          version = match.group(1)
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} does not match launcher version {version!r}")
+
+      - name: Run tests
+        run: python -m pytest
+
+  build-windows:
+    name: Build Windows x64
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -r backend/requirements.txt pyinstaller
+
+      - name: Build portable executable
+        shell: pwsh
+        run: .\scripts\build_exe.ps1 -Python ((Get-Command python).Source) -SkipInstall
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path launcher.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Upload Windows asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/VideoToNo-${{ env.VERSION }}-portable.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-windows
+    # workflow_dispatch 的手动跑只到 build-windows 为止：没有 tag 就没有版本号，
+    # 让它跑下去会拿分支名去 gh release create
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # heredoc 不带引号：正文里的 $ 必须写成 \$，否则 $$ 会被展开成 shell 进程号（v1.4.0 实测踩到）
+          NOTES=$(cat <<EOF
+          ## VideoToNo $GITHUB_REF_NAME
+
+          ### v1.4.5 更新
+
+          - **长视频和本地小模型更容易一次跑完**：以前中间任何一次模型请求被通道拒掉，整条任务直接失败、已经写出来的东西全丢。现在「整理某一段」失败只跳过那一段并把原文留在笔记里，归并失败停在当前层，结尾补写失败保留已写好的笔记，每种情况都留一句说明原因。同时切块前先把语音转写的碎行合并（碎行摊上时间戳开销会把几分钟的素材切成好几块，每块多押一次有损整理），整理与补写的输出额度改按材料字数给；一旦实测到某条通道在返回思考链，就自动给它补上思考预留。
+          - **本地模型报错会说是哪容量不够**：ollama / LM Studio 这类小模型跑长一点的视频，以前只回一句英文的 token 超限，读起来像「程序里有个开关可以调」。现在直接说明是模型的上下文窗口不够，并给出可操作项（调大 num_ctx、换上下文更大的模型、或改用精简摘要）。失败提示里也不再出现「换个推理档位」这种在该通道上完全无效的建议。
+          - **产物都按视频标题命名**：导出的纯文本 / HTML / JSON / PNG 不再是 video_summary_2026-09-26T13-04-55.txt；B 站分 P 带上 P 号与分 P 名（如 深度学习课【P2 第二章 梯度】）；「仅转录字幕」的产物单独归档到 workspace/transcripts/ 下，文件名是 标题【转录】.md。完成提示的第一行现在直接给该拿的那份文件，UUID 任务目录降到后面（音频与抽帧还在里面，仍要能找到）。
+          - **转写崩溃不再带走整个程序**：语音转写挪进独立进程。个别 C++ 转写库在打包环境里出访问违例时，以前是整个应用静默消失、日志一行不剩，现在是一次任务失败并写清退出码，程序仍在运行，换一个转写档位即可重试。
+          - **「只有重启电脑才好」那类故障有了自查入口**：测试连接带代理连不上时会自动绕开代理直连再试一次，并说清是代理的问题还是整条网络都不通；B 站 / 抖音扫码登录对本机浏览器的调用不再可能被系统代理劫走；页面报 5xx 时自动做一次本机体检，侧栏新增「本机自检」可看完整报告。
+          - **启动时会检查新版本**：发现更新弹一次窗，三个选择是确定更新 / 忽略本次 / 取消，忽略按版本记住，不会反复打扰。
+          - **验证**：本机 pytest 353 通过。命名与归档走真后端加真浏览器，逐项截下下载名核对；转写崩溃用打包产物复现同一条任务，确认程序存活、错误文案带退出码、健康检查仍可读，并在修好之后的产物上跑通一段 13 分 55 秒的真音频转写（506 段，中文正常）；上下文与思考额度两类新文案，依据是群测日志里那行原始报错。**没验到的**：额度放宽要等同一通道被走过一次才生效，第一次请求仍可能失败（只是不再丢内容）；碎行合并改了中短视频喂给模型的材料形态，还没拿真视频做前后对照。
+
+          EOF
+          )
+          gh release create "$GITHUB_REF_NAME" release-assets/* --notes "$NOTES" --title "VideoToNo $GITHUB_REF_NAME"
