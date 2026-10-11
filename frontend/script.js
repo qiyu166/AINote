@@ -56,6 +56,21 @@ const PROVIDER_CONFIG = {
             ['deepseek-v4-flash', 'DeepSeek V4 Flash（旧名 · 已并入 V4.1）']
         ]
     },
+    groq: {
+        // 主用途是云端转写（whisper-large-v3 系列）：在这里选一次、填入 Key 并
+        // 「保存到本机」，转写器就能按接口地址取到它。本机 Key 按 base_url 分条保存，
+        // 所以存完 Groq 再把供应商切回 DeepSeek，两把 Key 都在。
+        name: 'Groq（云端转写 / LLM）',
+        baseUrl: 'https://api.groq.com/openai/v1',
+        defaultModel: 'whisper-large-v3-turbo',
+        models: [
+            ['whisper-large-v3-turbo', 'Whisper Large v3 Turbo（转写 · 推荐）'],
+            ['whisper-large-v3', 'Whisper Large v3（转写）'],
+            ['openai/gpt-oss-120b', 'GPT-OSS 120B（LLM）'],
+            ['openai/gpt-oss-20b', 'GPT-OSS 20B（LLM）'],
+            ['qwen/qwen3.8-27b', 'Qwen3.8 27B（LLM）']
+        ]
+    },
     openai: {
         name: 'OpenAI',
         baseUrl: 'https://api.openai.com/v1',
@@ -127,6 +142,10 @@ let currentMarkdown = '';
 let currentHtml = '';
 // 后端下发的下载名（含视频标题与 B 站分 P 名），空串时回退成时间戳名
 let currentDownloadName = '';
+// 发芽要用：当前笔记的标题，以及归档后的绝对路径（决定报告写到哪个目录、
+// 以及 [[双链]] 指向哪个文件名）
+let currentNoteTitle = '';
+let currentArchivedPath = '';
 let pollTimer = null;
 let pollErrorCount = 0;
 let isSubmitting = false;
@@ -151,11 +170,8 @@ document.addEventListener('DOMContentLoaded', () => {
     safeStep(bindEvents, '绑定页面事件');
     safeStep(toggleSourceType, '初始化来源切换');
     safeStep(applyServiceState, '显示本机服务地址');
-    safeStep(applyMcpAccess, '初始化 MCP 接入信息');
     loadAppVersion();
     loadRecentTasks(true);
-    // 启动自检更新：晚几秒再发，别跟首屏请求抢路；失败静默，托盘里有手动入口
-    window.setTimeout(runStartupUpdateCheck, 2500);
     window.__videoToNoReady = true;
 });
 
@@ -187,53 +203,10 @@ async function loadAppVersion() {
             byId('appVersion').textContent = `v${data.version}${port}`;
         }
         applyUploadLimit(data.max_upload_mb);
-        applyMcpAccess(data.dependencies?.mcp_sse);
     } catch {
         // 保留 HTML 中的构建版本，服务短暂未就绪不影响页面使用。
         applyUploadLimit(null);
     }
-}
-
-function mcpSseUrl() {
-    return `${location.origin}/mcp/sse`;
-}
-
-function mcpJsonConfig() {
-    return JSON.stringify(
-        { mcpServers: { "video-to-note": { type: "sse", url: mcpSseUrl() } } },
-        null,
-        2
-    );
-}
-
-// 只有后端明确说 mcp 没挂上才提示"连不通"；老后端没这个字段时按可用显示。
-function applyMcpAccess(mcpSse) {
-    const url = byId('mcpSseUrl');
-    if (url) url.textContent = mcpSseUrl();
-    const unavailable = byId('mcpUnavailable');
-    if (unavailable) unavailable.hidden = mcpSse !== false;
-    // 芯片和提示条都要等后端确认 MCP 真挂上了才出现，否则等于承诺一个连不通的地址
-    const chip = byId('mcpStatusChip');
-    if (chip) chip.hidden = mcpSse !== true;
-    const hint = byId('mcpHint');
-    if (hint) hint.hidden = !(mcpSse === true && !prefs.ui.mcp_hint_seen);
-}
-
-function revealMcpAccess() {
-    const card = byId('mcpSection');
-    if (!card) return;
-    card.open = true;
-    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    const copyButton = byId('copyMcpUrlBtn');
-    if (copyButton) copyButton.focus();
-    dismissMcpHint();
-}
-
-function dismissMcpHint() {
-    prefs.ui.mcp_hint_seen = true;
-    persistPrefs();
-    const hint = byId('mcpHint');
-    if (hint) hint.hidden = true;
 }
 
 async function copyTextToClipboard(text, successLabel) {
@@ -260,7 +233,7 @@ function applyUploadLimit(maxUploadMb) {
     maxUploadLabel = mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GB` : `${mb} MB`;
     const fileInfo = byId('fileInfo');
     if (fileInfo) {
-        fileInfo.textContent = `支持 B 站/抖音等视频链接与最大 ${maxUploadLabel} 的本地视频`;
+        fileInfo.textContent = `支持 B 站视频链接与最大 ${maxUploadLabel} 的本地视频`;
     }
 }
 
@@ -278,9 +251,26 @@ function bindEvents() {
     });
     bindListener('cancelTaskBtn', 'click', cancelCurrentTask);
     bindListener('downloadMdBtn', 'click', downloadSummary);
+    bindListener('sproutNoteBtn', 'click', () => toggleThinkMenu());
+    const thinkMenuList = byId('thinkMenuList');
+    if (thinkMenuList) {
+        thinkMenuList.addEventListener('click', (event) => {
+            const item = event.target.closest('[data-think-mode]');
+            if (item) runThinkMode(item.dataset.thinkMode);
+        });
+    }
+    bindListener('sproutCloseBtn', 'click', closeSproutPanel);
     bindListener('copyNoteBtn', 'click', copyFullNote);
     bindListener('formatSelect', 'change', toggleImageLayout);
     bindListener('refreshRecentTasksBtn', 'click', () => loadRecentTasks());
+    bindListener('loadMoreTasksBtn', 'click', loadMoreRecentTasks);
+    bindListener('aggregateSproutBtn', 'click', () => toggleAggregateMode(true, 'sprout'));
+    bindListener('batchDeleteBtn', 'click', () => toggleAggregateMode(true, 'delete'));
+    bindListener('aggregateCancelBtn', 'click', () => toggleAggregateMode(false));
+    bindListener('aggregateSelectAllBtn', 'click', () => pickAllAggregate(true));
+    bindListener('aggregateSelectNoneBtn', 'click', () => pickAllAggregate(false));
+    bindListener('aggregateStartBtn', 'click', startAggregateSprout);
+    bindListener('aggregateDeleteBtn', 'click', () => deleteTasks(Array.from(aggregatePicked)));
     const recentTaskList = byId('recentTaskList');
     if (recentTaskList) {
         recentTaskList.addEventListener('click', (event) => {
@@ -290,7 +280,12 @@ function bindEvents() {
                 return;
             }
             const button = event.target.closest('[data-task-id]');
-            if (button) openRecentTask(button.dataset.taskId);
+            if (!button) return;
+            if (aggregateMode) {
+                toggleAggregatePick(button.dataset.taskId);
+                return;
+            }
+            openRecentTask(button.dataset.taskId);
         });
     }
     bindListener('llmProfile', 'change', handleProfileChange);
@@ -299,25 +294,23 @@ function bindEvents() {
     bindListener('llmModel', 'change', handleModelChange);
     bindListener('llmTestBtn', 'click', testLlmConnection);
     bindListener('diagBtn', 'click', runDiagnostics);
-    bindListener('updateAcceptBtn', 'click', acceptUpdateOffer);
-    bindListener('updateIgnoreBtn', 'click', ignoreUpdateOffer);
-    bindListener('updateCancelBtn', 'click', dismissUpdateOffer);
     bindListener('saveKeyBtn', 'click', saveApiKey);
     bindListener('clearKeyBtn', 'click', clearSavedKey);
     bindListener('customProfileAddBtn', 'click', addCustomProfile);
     bindListener('customProfileDeleteBtn', 'click', deleteCustomProfile);
-    bindListener('manualModelBtn', 'click', manualImportWhisperModel);
-    bindListener('copyMcpUrlBtn', 'click', () => copyTextToClipboard(mcpSseUrl(), 'MCP 地址已复制'));
-    bindListener('copyMcpConfigBtn', 'click', () =>
-        copyTextToClipboard(mcpJsonConfig(), 'MCP 配置已复制，到客户端粘贴导入即可'));
-    bindListener('mcpStatusChip', 'click', revealMcpAccess);
-    bindListener('mcpHintGoBtn', 'click', revealMcpAccess);
-    bindListener('mcpHintDismissBtn', 'click', dismissMcpHint);
     bindListener('sourceType', 'change', () => {
         toggleSourceType();
         resetSubmitLabel();
     });
     bindPreferenceAutoSave();
+    // 下拉菜单的常规关闭姿势：点别处、按 Esc。菜单挂在工具栏里，
+    // 不关掉会盖住下面的笔记内容。
+    document.addEventListener('click', (event) => {
+        if (!event.target.closest('.think-menu')) toggleThinkMenu(false);
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') toggleThinkMenu(false);
+    });
     const videoUrl = byId('videoUrl');
     if (videoUrl) {
         videoUrl.addEventListener('input', () => {
@@ -332,7 +325,6 @@ function bindEvents() {
     }
     bindListener('biliHintScanBtn', 'click', startBiliLogin);
     bindListener('biliHintManualBtn', 'click', revealBiliCredentials);
-    bindListener('douyinLoginBtn', 'click', startDouyinLogin);
     bindListener('biliHintDismissBtn', 'click', dismissBiliHint);
     bindListener('biliPagesAllBtn', 'click', () => setBiliPagesSelection('all'));
     bindListener('biliPagesNoneBtn', 'click', () => setBiliPagesSelection('none'));
@@ -347,8 +339,6 @@ function bindEvents() {
     window.addEventListener('beforeunload', () => {
         stopPolling();
         stopElapsedTimer();
-        stopDouyinLoginPolling();
-        stopManualImportPolling();
     });
 }
 
@@ -377,7 +367,7 @@ const TASK_STATUS_LABELS = {
 };
 
 // 已结束 + 尚未开始处理的任务可以直接删；运行中的任务（queued/processing）只能先取消
-const DELETABLE_TASK_STATUSES = ['failed', 'cancelled', 'uploaded', 'pending'];
+const DELETABLE_TASK_STATUSES = ['completed', 'failed', 'cancelled', 'uploaded', 'pending'];
 
 // 后端给的 elapsed_seconds 从提交起算（含排队），未结束的任务本地继续按秒推进，
 // 不必为此多打一轮 /api/tasks
@@ -387,6 +377,143 @@ const NO_ELAPSED_TASK_STATUSES = ['uploaded'];
 let recentTaskRows = new Map();
 let recentTasksSyncedAt = 0;
 let recentTasksElapsedTimer = null;
+// 「最近任务」分页：首屏一页，点一次「加载更多」多要一页；total 由后端给，
+// 前端才知道到底还有没有更多（只靠"给满一页"猜不准）。
+const RECENT_TASKS_PAGE_SIZE = 20;
+let recentTasksLimit = RECENT_TASKS_PAGE_SIZE;
+let recentTasksTotal = 0;
+
+// ---- 整体发芽：在「最近任务」里勾选多篇，跨篇找共同种子 ----
+// 后端上限是 8 篇（每篇还会截断），这里前端先卡住，避免用户白勾一通。
+const AGGREGATE_SPROUT_MAX = 8;
+let aggregateMode = false;
+// 同一个勾选模式服务两个用途，可选范围不一样：
+//   sprout —— 整体发芽：要「跑完的笔记任务」，字幕稿没有笔记正文
+//   delete —— 批量删除：只要「没在跑」都能删，字幕稿和失败任务也算
+let aggregatePurpose = 'sprout';
+let aggregatePicked = new Set();
+let recentTasksCache = [];
+
+function aggregateEligible(task) {
+    if (aggregatePurpose === 'delete') {
+        return !LIVE_TASK_STATUSES.includes(task.status);
+    }
+    return task.status === 'completed' && task.output !== 'transcript';
+}
+
+function aggregateBarRefresh() {
+    const eligible = recentTasksCache.filter(aggregateEligible).length;
+    const picked = aggregatePicked.size;
+    byId('aggregateCount').textContent = `已选 ${picked} 篇`;
+    byId('aggregateStartBtn').hidden = aggregatePurpose !== 'sprout';
+    byId('aggregateDeleteBtn').hidden = aggregatePurpose !== 'delete';
+    byId('aggregateStartBtn').disabled = picked === 0;
+    byId('aggregateStartBtn').textContent = picked > 0 ? `开始发芽（${picked}）` : '开始发芽';
+    byId('aggregateDeleteBtn').disabled = picked === 0;
+    byId('aggregateDeleteBtn').textContent = picked > 0 ? `删除选中（${picked}）` : '删除选中';
+    if (eligible === 0) {
+        byId('aggregateHint').textContent = aggregatePurpose === 'delete'
+            ? '没有可删除的任务（运行中的任务要先取消）'
+            : '没有可发芽的笔记（字幕稿没有笔记正文）';
+    } else {
+        byId('aggregateHint').textContent = aggregatePurpose === 'delete'
+            ? `勾选要删除的任务（共 ${eligible} 个可删；知识库里的笔记会保留）`
+            : `勾选要一起发芽的笔记，最多 ${AGGREGATE_SPROUT_MAX} 篇`;
+    }
+}
+
+function toggleAggregateMode(on, purpose = 'sprout') {
+    aggregateMode = Boolean(on);
+    if (aggregateMode) aggregatePurpose = purpose;
+    if (!aggregateMode) aggregatePicked = new Set();
+    byId('aggregateBar').hidden = !aggregateMode;
+    byId('aggregateSproutBtn').disabled = aggregateMode;
+    byId('batchDeleteBtn').disabled = aggregateMode;
+    renderRecentTasks(recentTasksCache);
+    aggregateBarRefresh();
+    if (aggregateMode && recentTasksCache.length === 0) loadRecentTasks(true);
+}
+
+function toggleAggregatePick(taskId) {
+    const task = recentTasksCache.find((item) => item.task_id === taskId);
+    if (!task || !aggregateEligible(task)) {
+        showToast(
+            aggregatePurpose === 'delete'
+                ? '这条任务正在运行，要先取消并等它停下来'
+                : '这条没有笔记正文（字幕稿不能整体发芽）',
+            'error'
+        );
+        return;
+    }
+    if (aggregatePicked.has(taskId)) {
+        aggregatePicked.delete(taskId);
+    } else {
+        if (aggregatePurpose === 'sprout' && aggregatePicked.size >= AGGREGATE_SPROUT_MAX) {
+            showToast(`一次最多 ${AGGREGATE_SPROUT_MAX} 篇`, 'error');
+            return;
+        }
+        aggregatePicked.add(taskId);
+    }
+    renderRecentTasks(recentTasksCache);
+    aggregateBarRefresh();
+}
+
+function pickAllAggregate(on) {
+    aggregatePicked = new Set();
+    if (on) {
+        const eligible = recentTasksCache.filter(aggregateEligible);
+        const chosen = aggregatePurpose === 'sprout'
+            ? eligible.slice(0, AGGREGATE_SPROUT_MAX)
+            : eligible;
+        chosen.forEach((task) => aggregatePicked.add(task.task_id));
+    }
+    renderRecentTasks(recentTasksCache);
+    aggregateBarRefresh();
+}
+
+async function startAggregateSprout() {
+    if (aggregatePicked.size === 0) return;
+    const modelConfig = getSelectedModelConfig();
+    if (!modelConfig) {
+        showToast('请先在左侧配置模型', 'error');
+        return;
+    }
+    const llmConfig = {
+        model_type: modelConfig.provider,
+        base_url: modelConfig.baseUrl,
+        model: modelConfig.model
+    };
+    const typedKey = typedApiKey();
+    if (typedKey) llmConfig.api_key = typedKey;
+
+    const startButton = byId('aggregateStartBtn');
+    startButton.disabled = true;
+    startButton.textContent = '跨篇发芽中…';
+    setSproutPanelTitle('🌱 整体发芽');
+    setSproutPanelPath('正在读这几篇笔记，找出它们共同的种子…');
+    try {
+        const response = await fetch(`${API_BASE}/knowledge/sprout-aggregate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                task_ids: Array.from(aggregatePicked),
+                llm_config: llmConfig
+            })
+        });
+        const data = await readResponse(response, '整体发芽失败');
+        showSproutPanel(data, '这几篇没有找到共同种子，本次没有写入知识库');
+        if (data.report_path) {
+            showToast(`整体发芽已写入知识库（${data.linked_count} 篇建立双链）`, 'success');
+            toggleAggregateMode(false);
+        }
+    } catch (error) {
+        setSproutPanelPath('');
+        showToast(error.message, 'error');
+    } finally {
+        startButton.disabled = aggregatePicked.size === 0;
+        aggregateBarRefresh();
+    }
+}
 
 function recentTaskMetaText(task, nowSeconds) {
     const created = formatTaskDate(task.created_at);
@@ -418,15 +545,49 @@ function armRecentTasksElapsedTicker() {
 
 async function loadRecentTasks(silent = false) {
     const refreshButton = byId('refreshRecentTasksBtn');
+    const moreButton = byId('loadMoreTasksBtn');
     refreshButton.disabled = true;
+    if (moreButton) moreButton.disabled = true;
     try {
-        const response = await fetch(`${API_BASE}/tasks`, { cache: 'no-store' });
+        const response = await fetch(`${API_BASE}/tasks?limit=${recentTasksLimit}`, {
+            cache: 'no-store'
+        });
         const data = await readResponse(response, '读取最近任务失败');
-        renderRecentTasks(Array.isArray(data.tasks) ? data.tasks : []);
+        recentTasksCache = Array.isArray(data.tasks) ? data.tasks : [];
+        recentTasksTotal = Number(data.total) || recentTasksCache.length;
+        // 列表刷新后已选任务可能已经不在（被删/被清），同步剔除，免得后端报「任务不存在」
+        aggregatePicked = new Set(
+            Array.from(aggregatePicked).filter((id) =>
+                recentTasksCache.some(
+                    (task) => task.task_id === id && aggregateEligible(task)
+                )
+            )
+        );
+        renderRecentTasks(recentTasksCache);
+        if (aggregateMode) aggregateBarRefresh();
     } catch (error) {
         if (!silent) showToast(error.message, 'error');
     } finally {
         refreshButton.disabled = false;
+        if (moreButton) moreButton.disabled = false;
+    }
+}
+
+// 「加载更多」：一次多要一页，已经展开的页数不因为刷新而缩回去
+function loadMoreRecentTasks() {
+    if (recentTasksCache.length >= recentTasksTotal) return;
+    recentTasksLimit += RECENT_TASKS_PAGE_SIZE;
+    loadRecentTasks(true);
+}
+
+function renderRecentTasksMore() {
+    const box = byId('recentTasksMore');
+    if (!box) return;
+    const shown = recentTasksCache.length;
+    const hasMore = shown < recentTasksTotal;
+    box.hidden = !hasMore;
+    if (hasMore) {
+        byId('loadMoreTasksBtn').textContent = `加载更多（已显示 ${shown} / 共 ${recentTasksTotal}）`;
     }
 }
 
@@ -440,6 +601,21 @@ function renderRecentTasks(tasks) {
     tasks.forEach((task) => {
         const row = document.createElement('div');
         row.className = 'recent-task-row';
+        if (aggregateMode) {
+            const eligible = aggregateEligible(task);
+            row.classList.add('aggregate-mode');
+            row.classList.toggle('is-picked', aggregatePicked.has(task.task_id));
+            row.classList.toggle('is-unavailable', !eligible);
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.className = 'aggregate-check';
+            check.checked = aggregatePicked.has(task.task_id);
+            check.disabled = !eligible;
+            check.tabIndex = -1;
+            check.setAttribute('aria-hidden', 'true');
+            if (!eligible) check.title = '字幕稿没有笔记正文，不能整体发芽';
+            row.append(check);
+        }
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'recent-task-item';
@@ -467,8 +643,9 @@ function renderRecentTasks(tasks) {
         button.append(text, status);
         row.append(button);
         // 排队中/处理中只能取消（后端拒绝删除运行中的任务）；未开始的任务可以直接删掉，
-        // 否则上传后放弃的孤儿任务会永久占着最近任务列表
-        if (DELETABLE_TASK_STATUSES.includes(task.status)) {
+        // 否则上传后放弃的孤儿任务会永久占着最近任务列表。
+        // 整体发芽的勾选模式下不出现删除按钮：一边选一边删太容易误触。
+        if (!aggregateMode && DELETABLE_TASK_STATUSES.includes(task.status)) {
             const deleteButton = document.createElement('button');
             deleteButton.type = 'button';
             deleteButton.className = 'recent-task-delete';
@@ -482,24 +659,49 @@ function renderRecentTasks(tasks) {
         list.append(row);
     });
     armRecentTasksElapsedTicker();
+    renderRecentTasksMore();
 }
 
 async function deleteStoppedTask(taskId) {
-    if (!window.confirm('将删除该任务及其音频、转录和截图，删除后无法继续复用。确定删除吗？')) return;
-    try {
-        const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
-            method: 'DELETE'
-        });
-        await readResponse(response, '删除任务失败');
-        if (currentTaskId === taskId) {
-            resetTaskView();
-            byId('progressArea').hidden = true;
+    await deleteTasks([taskId]);
+}
+
+// 删除任务只清 workspace 里的中间产物（音频、转录、截图、notes.md）。
+// 知识库（Obsidian）里的笔记是归档副本，不会被一起删掉——这一点必须写进确认框，
+// 否则用户会以为删任务等于删笔记。「整体发芽」卡片同理，也留着自己处理。
+function deleteConfirmText(count) {
+    const head = count > 1 ? `删除选中的 ${count} 个任务？` : '删除这个任务？';
+    return `${head}\n\n`
+        + '会清掉它的音频、转录和截图，删除后无法继续复用。\n'
+        + '知识库（Obsidian）里已经归档的笔记会保留，不会一起删除。';
+}
+
+async function deleteTasks(taskIds) {
+    if (!taskIds.length) return;
+    if (!window.confirm(deleteConfirmText(taskIds.length))) return;
+    let done = 0;
+    const failures = [];
+    for (const taskId of taskIds) {
+        try {
+            const response = await fetch(`${API_BASE}/task/${encodeURIComponent(taskId)}`, {
+                method: 'DELETE'
+            });
+            await readResponse(response, '删除任务失败');
+            done += 1;
+            if (currentTaskId === taskId) {
+                resetTaskView();
+                byId('progressArea').hidden = true;
+            }
+        } catch (error) {
+            failures.push(error.message);
         }
-        await loadRecentTasks(true);
-        showToast('任务已删除', 'success');
-    } catch (error) {
-        showToast(`删除失败：${error.message}`, 'error');
-        loadRecentTasks(true);
+    }
+    if (aggregateMode) toggleAggregateMode(false);
+    await loadRecentTasks(true);
+    if (failures.length) {
+        showToast(`删除 ${done} 个，另有 ${failures.length} 个失败：${failures[0]}`, 'error');
+    } else {
+        showToast(done > 1 ? `已删除 ${done} 个任务` : '任务已删除', 'success');
     }
 }
 
@@ -606,7 +808,7 @@ function defaultPrefs() {
         by_provider: {},
         confirmations: { whisper_download: {} },
         global: {
-            whisper_model: 'base',
+            whisper_model: 'groq-whisper-large-v3-turbo',
             screenshot_interval: '10',
             include_screenshots: false,
             use_gpu: false,
@@ -894,7 +1096,6 @@ function applyPreferencesToForm() {
     refreshWhisperModelHints();
     byId('screenshotInterval').value = prefs.global.screenshot_interval;
     byId('includeScreenshots').checked = prefs.global.include_screenshots === true;
-    byId('useGpu').checked = prefs.global.use_gpu === true;
     byId('summaryStyle').value = prefs.global.summary_style;
     // 存过「最大」的旧偏好落到「质量」而不是被判成非法值退回 auto：
     // 这个 select 的值就是提交给后端的 reasoning_effort，静默变 auto 会改变实际档位
@@ -942,7 +1143,6 @@ function persistGlobals() {
     values.whisper_model = byId('whisperModel').value || values.whisper_model;
     values.screenshot_interval = byId('screenshotInterval').value;
     values.include_screenshots = byId('includeScreenshots').checked;
-    values.use_gpu = byId('useGpu').checked;
     values.summary_style = byId('summaryStyle').value;
     values.reasoning_effort = byId('reasoningEffort').value;
     values.processing_mode = document.querySelector('input[name="processingMode"]:checked')?.value
@@ -969,7 +1169,7 @@ function handleModelChange() {
 // 改动即记住：曾经只有点「保存偏好」才落盘，正常提交不保存，
 // 于是重开页面必然弹回默认档案。
 function bindPreferenceAutoSave() {
-    ['whisperModel', 'summaryStyle', 'reasoningEffort', 'includeScreenshots', 'useGpu']
+    ['whisperModel', 'summaryStyle', 'reasoningEffort', 'includeScreenshots']
         .forEach((id) => bindListener(id, 'change', persistGlobals));
     document.querySelectorAll('input[name="processingMode"]').forEach((input) => {
         input.addEventListener('change', persistGlobals);
@@ -1407,15 +1607,9 @@ function applyOutputMode() {
 
 let biliHintDebounce = null;
 let biliPromptDismissed = false;
-let douyinLoginTimer = null;
-let douyinCookies = null;
 
 function isBilibiliUrl(value) {
     return /bilibili\.com|b23\.tv|BV[0-9A-Za-z]{10}/.test(value);
-}
-
-function isDouyinUrl(value) {
-    return /(^|\.)douyin\.com|iesdouyin\.com/.test(value);
 }
 
 function hasBiliCredentials() {
@@ -1432,7 +1626,6 @@ function hasBiliCredentials() {
 function taskWillLikelyUseSubtitles(request) {
     if (!request || request.sourceType === 'local') return false;
     if (isBilibiliUrl(request.videoUrl) && hasBiliCredentials()) return true;
-    if (isDouyinUrl(request.videoUrl) && douyinCookies) return true;
     return false;
 }
 
@@ -1449,31 +1642,18 @@ function updateBiliHint(forceShow = false) {
     const value = byId('videoUrl').value.trim();
     const notLocal = byId('sourceType').value !== 'local';
     const isBili = notLocal && isBilibiliUrl(value);
-    const isDouyin = notLocal && isDouyinUrl(value);
     const hint = byId('biliHint');
     const actions = byId('biliHintActions');
     const biliScanButton = byId('biliHintScanBtn');
     const biliManualButton = byId('biliHintManualBtn');
     // 兼容旧版缓存的 HTML：提示条元素缺失时静默跳过，不影响其他功能
     if (!hint || !actions || !biliScanButton || !biliManualButton) return;
-    const douyinButton = byId('douyinLoginBtn');
-    const douyinStatus = byId('douyinLoginStatus');
-    if (douyinButton) douyinButton.hidden = true;
-    if (douyinStatus) douyinStatus.textContent = '';
     if (forceShow || (isBili && !hasBiliCredentials() && !biliPromptDismissed)) {
         byId('biliHintTitle').textContent = '检测到 B 站链接';
         byId('biliHintDesc').textContent = '填写访问凭据可优先使用 AI 字幕，无需等待本地转写。';
         actions.hidden = false;
         biliScanButton.hidden = false;
         biliManualButton.hidden = false;
-        hint.hidden = false;
-    } else if (forceShow || (isDouyin && !biliPromptDismissed)) {
-        byId('biliHintTitle').textContent = '检测到抖音链接';
-        byId('biliHintDesc').textContent = '先尝试直接解析；如果需要验证，可在本机浏览器完成后重试。';
-        actions.hidden = false;
-        biliScanButton.hidden = true;
-        biliManualButton.hidden = true;
-        if (douyinButton) douyinButton.hidden = false;
         hint.hidden = false;
     } else {
         hint.hidden = true;
@@ -1762,54 +1942,6 @@ async function cancelBiliLogin() {
     }
 }
 
-async function startDouyinLogin() {
-    if (douyinLoginTimer) return;
-    const button = byId('douyinLoginBtn');
-    const status = byId('douyinLoginStatus');
-    button.disabled = true;
-    status.textContent = '正在打开抖音浏览器…';
-    try {
-        const response = await fetch(`${API_BASE}/douyin-login/start`, { method: 'POST' });
-        const data = await readResponse(response, '启动抖音浏览器失败');
-        if (!data.ok) {
-            status.textContent = data.error || data.message || '启动失败';
-            button.disabled = false;
-            return;
-        }
-        status.textContent = data.message || '请在弹出的浏览器中完成登录或验证';
-        douyinLoginTimer = window.setInterval(pollDouyinLogin, 2000);
-        pollDouyinLogin();
-    } catch (error) {
-        status.textContent = `启动失败：${error.message}`;
-        button.disabled = false;
-    }
-}
-
-async function pollDouyinLogin() {
-    try {
-        const response = await fetch(`${API_BASE}/douyin-login/status`, { cache: 'no-store' });
-        const data = await readResponse(response, '读取抖音浏览器状态失败');
-        byId('douyinLoginStatus').textContent = data.message || '';
-        if (data.state === 'ready' && data.cookies) {
-            douyinCookies = data.cookies;
-            stopDouyinLoginPolling();
-            showToast('抖音浏览器验证完成，下一次提交会携带本机登录态', 'success');
-        } else if (['failed', 'timeout'].includes(data.state)) {
-            stopDouyinLoginPolling();
-        }
-    } catch {
-        byId('douyinLoginStatus').textContent = '状态读取失败，正在重试…';
-    }
-}
-
-function stopDouyinLoginPolling() {
-    if (douyinLoginTimer !== null) {
-        window.clearInterval(douyinLoginTimer);
-        douyinLoginTimer = null;
-    }
-    byId('douyinLoginBtn').disabled = false;
-}
-
 function updateFileInfo() {
     if (byId('sourceType').value !== 'local') {
         byId('fileInfo').textContent = '支持常见视频链接；平台字幕可用时优先读取';
@@ -1836,6 +1968,12 @@ const WHISPER_MODEL_SIZES = {
     turbo: '~1.6GB',
     'belle-turbo-zh': '~0.8GB',
     'paraformer-zh': '~0.5GB'
+};
+// Groq 是云端转写：不进 /api/whisper-models 的本地缓存清单，标注为「云端 · 免下载」，
+// 不参与「未缓存，首次使用需下载」那套提示。
+const CLOUD_ASR_MODELS = {
+    'groq-whisper-large-v3-turbo': 'Groq 云端 · 免下载 · 需在模型配置里填 Groq Key',
+    'groq-whisper-large-v3': 'Groq 云端 · 免下载 · 需在模型配置里填 Groq Key'
 };
 
 let whisperFallbackNotified = false;
@@ -1874,93 +2012,6 @@ async function refreshWhisperModelHints() {
 function formatBytes(bytes) {
     if (!bytes) return '0 MB';
     return `${(bytes / 1024 / 1024).toFixed(bytes > 10 * 1024 * 1024 ? 0 : 1)} MB`;
-}
-
-// ---- Whisper 模型手动导入（大模型下载慢/反复失败时的替代方案）----
-// 约定：把该模型的权重文件放入 workspace/_model_cache/manual/{model}/，
-// 后端实时扫描该目录，放入后自动识别为「已缓存」。
-// 需要哪些文件、去哪个仓库下载由 /api/whisper-models/manual-folder 给出
-// （词表文件名各仓库不统一，vocabulary.txt / vocabulary.json 都算数）。
-const MANUAL_IMPORT_POLL_MS = 5000;
-const MANUAL_IMPORT_POLL_MAX_TICKS = 24; // 约 2 分钟后停止轮询
-let manualImportPollTimer = null;
-let manualImportPollRemaining = 0;
-
-function stopManualImportPolling() {
-    if (manualImportPollTimer) {
-        window.clearInterval(manualImportPollTimer);
-        manualImportPollTimer = null;
-    }
-}
-
-function startManualImportPolling(modelId) {
-    stopManualImportPolling();
-    manualImportPollRemaining = MANUAL_IMPORT_POLL_MAX_TICKS;
-    manualImportPollTimer = window.setInterval(async () => {
-        manualImportPollRemaining -= 1;
-        if (isTaskActive || manualImportPollRemaining <= 0) {
-            stopManualImportPolling();
-            return;
-        }
-        await refreshWhisperModelHints();
-        const option = byId('whisperModel').selectedOptions[0];
-        if (option && option.value === modelId && option.dataset.status === 'cached') {
-            stopManualImportPolling();
-            showToast(`已识别手动导入的模型文件（${modelId}）`, 'success');
-        }
-    }, MANUAL_IMPORT_POLL_MS);
-}
-
-async function requestManualImportGuide(modelId, openFolder) {
-    const response = await fetch(`${API_BASE}/whisper-models/manual-folder`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: modelId, open: openFolder })
-    });
-    return readResponse(response, '读取模型导入信息失败');
-}
-
-async function manualImportWhisperModel() {
-    const option = byId('whisperModel').selectedOptions[0];
-    if (!option) return;
-    const modelId = option.value;
-    const modelLabel = (option.dataset.baseLabel || option.textContent).split('（')[0];
-    let guide;
-    try {
-        // 文件清单与仓库地址以后端为准：词表文件名各仓库不统一，turbo 系也不在 Systran 仓
-        guide = await requestManualImportGuide(modelId, false);
-    } catch (error) {
-        showToast(error.message || '读取模型导入信息失败', 'error');
-        return;
-    }
-    const guideSteps = guide.folders
-        .map(
-            (folder, index) =>
-                `${index + 1}. ${folder.label}\n`
-                + `    下载这些文件（不要改文件名）：${folder.files.join(' / ')}\n`
-                + `    下载页：${folder.download_url}\n`
-                + `    放入：${folder.path}`
-        )
-        .join('\n');
-    const confirmed = window.confirm(
-        `将为模型「${modelLabel}」打开手动导入文件夹。\n\n`
-        + (guide.folders.length > 1 ? '这个模型由几个组件组成，逐个放好：\n' : '步骤：\n')
-        + `${guideSteps}\n\n`
-        + '文件就位后程序几秒内自动识别，下拉框会显示「已缓存」。\n\n'
-        + '现在打开文件夹吗？'
-    );
-    if (!confirmed) return;
-    try {
-        const data = await requestManualImportGuide(modelId, true);
-        if (data.opened) {
-            showToast(`已打开导入文件夹：${data.open_path}`, 'success');
-        } else {
-            window.prompt('未能自动打开文件夹，请手动前往以下路径放入模型文件：', data.open_path);
-        }
-        startManualImportPolling(modelId);
-    } catch (error) {
-        showToast(error.message || '打开模型文件夹失败', 'error');
-    }
 }
 
 function normalizeScreenshotInterval() {
@@ -2142,7 +2193,8 @@ function buildSummarizeConfig(
         video_url: videoUrl,
         prefer_subtitles: true,
         whisper_model: byId('whisperModel').value,
-        use_gpu: byId('useGpu').checked,
+        // 本机是 Apple Silicon，没有 CUDA；本地转写固定走 CPU
+        use_gpu: false,
         processing_mode: forceRestart ? 'restart' : 'reuse'
     };
     // 分 P 面板可见时显式下发勾选页码（全选也下发：显式指定优先于 URL ?p=N 规则）
@@ -2172,7 +2224,7 @@ function buildSummarizeConfig(
         config.llm_config = llmConfig;
     }
 
-    // 平台字幕（B 站 AI 字幕 / 抖音）两条路都要靠凭据，与是否调用大模型无关
+    // 平台字幕（B 站 AI 字幕）要靠凭据，与是否调用大模型无关
     const sessdata = byId('sessdata').value.trim();
     if (sessdata) {
         config.bilibili_cookie = {
@@ -2180,9 +2232,6 @@ function buildSummarizeConfig(
             bili_jct: byId('biliJct').value.trim(),
             buvid3: byId('buvid3').value.trim()
         };
-    }
-    if (douyinCookies) {
-        config.douyin_cookie = douyinCookies;
     }
     if (uploadTaskId) config.upload_task_id = uploadTaskId;
     if (resumeTaskId && !forceRestart) config.resume_task_id = resumeTaskId;
@@ -2310,6 +2359,8 @@ function resetTaskView() {
     currentMarkdown = '';
     currentHtml = '';
     currentDownloadName = '';
+    currentNoteTitle = '';
+    currentArchivedPath = '';
     setTranscriptTaskView(false);
     byId('progressArea').hidden = false;
     byId('resultArea').hidden = true;
@@ -2317,6 +2368,8 @@ function resetTaskView() {
     byId('downloadMdBtn').disabled = true;
     byId('copyNoteBtn').disabled = true;
     byId('regenerateBtn').disabled = true;
+    byId('sproutNoteBtn').disabled = true;
+    closeSproutPanel();
     byId('outputNotice').hidden = true;
     byId('outputPath').textContent = '';
     byId('taskDirPath').textContent = '';
@@ -2566,6 +2619,12 @@ async function showResult(result) {
     const archivedPath = typeof result.archived_path === 'string'
         ? result.archived_path.trim()
         : '';
+    // 发芽只对笔记有意义（字幕稿没有"内核"可长），且需要归档路径才能把报告
+    // 写到同一目录、并用 [[归档文件名]] 与原笔记互连。
+    currentNoteTitle = typeof result.title === 'string' ? result.title.trim() : '';
+    currentArchivedPath = archivedPath;
+    byId('sproutNoteBtn').disabled = Boolean(transcript) || !archivedPath || !currentNoteTitle;
+    closeSproutPanel();
     // 主行放"该拿的那一份"。归档文件名带视频标题，任务目录是一串 UUID 加固定名的中间
     // 产物（notes.md / transcript.md）——把后者摆在主行，用户会以为产物就叫 transcript.md
     // （群测原话），而下载和归档早就按标题命名了。
@@ -2700,6 +2759,99 @@ function renderMarkdownBase(markdown) {
 function renderMarkdown(markdown) {
     const { markdown: protectedMarkdown, segments } = extractMathSegments(markdown);
     return restoreMathSegments(renderMarkdownBase(protectedMarkdown), segments);
+}
+
+// ---- 发芽：读懂整篇笔记的思想内核，跨领域找连接，并落成独立笔记 ----
+// 对齐「得到大脑」的发芽：粒度是"一整篇笔记"，不是逐段；产出是一份独立报告，
+// 写进 Obsidian 后用 [[原笔记名]] 双链与原笔记互连。
+
+// 结果区工具栏的三个「思考」模式：同一个入口，落成三份不同的独立笔记。
+const THINK_MODES = {
+    sprout: { name: '发芽', panelTitle: '🌱 发芽', hint: '读懂这篇笔记的内核，跨领域找连接' },
+    interrogate: { name: '拷问', panelTitle: '⚔️ 拷问', hint: '挑出漏洞、点名逻辑谬误，并强制给替代方案' },
+    quiz: { name: '自测', panelTitle: '🎯 自测', hint: '把笔记变成能考自己的题' }
+};
+
+function toggleThinkMenu(open) {
+    const list = byId('thinkMenuList');
+    const button = byId('sproutNoteBtn');
+    if (!list || !button) return;
+    const next = typeof open === 'boolean' ? open : list.hidden;
+    list.hidden = !next;
+    button.setAttribute('aria-expanded', String(next));
+}
+
+async function runThinkMode(mode) {
+    toggleThinkMenu(false);
+    const spec = THINK_MODES[mode] || THINK_MODES.sprout;
+    if (!currentMarkdown) {
+        showToast('还没有可处理的笔记', 'error');
+        return;
+    }
+    const modelConfig = getSelectedModelConfig();
+    if (!modelConfig) {
+        showToast('请先在左侧配置模型', 'error');
+        return;
+    }
+    const llmConfig = {
+        model_type: modelConfig.provider,
+        base_url: modelConfig.baseUrl,
+        model: modelConfig.model
+    };
+    const typedKey = typedApiKey();
+    if (typedKey) llmConfig.api_key = typedKey;
+
+    const btn = byId('sproutNoteBtn');
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = `${spec.name}中…`;
+    setSproutPanelTitle(spec.panelTitle);
+    setSproutPanelPath(`正在${spec.hint}，通常需要 1~3 分钟…`);
+    try {
+        const response = await fetch(`${API_BASE}/knowledge/sprout`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode,
+                markdown: currentMarkdown,
+                title: currentNoteTitle,
+                note_path: currentArchivedPath,
+                llm_config: llmConfig
+            })
+        });
+        const data = await readResponse(response, `${spec.name}失败`);
+        showSproutPanel(data);
+        showToast(data.report_path ? `${spec.name}已写入知识库` : `${spec.name}完成`, 'success');
+    } catch (error) {
+        setSproutPanelPath('');
+        showToast(error.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+function setSproutPanelTitle(text) {
+    byId('sproutPanelTitle').textContent = text;
+}
+
+function setSproutPanelPath(text) {
+    byId('sproutPanel').hidden = !text;
+    byId('sproutPanelPath').textContent = text || '';
+}
+
+// emptyHint：没落盘时的说明文案。单篇发芽多半是「知识库目录不可写」，
+// 整体发芽则可能是「这几篇没有共同种子」——两者都不该被说成同一个原因。
+function showSproutPanel(data, emptyHint) {
+    const path = typeof data.report_path === 'string' ? data.report_path.trim() : '';
+    byId('sproutPanelBody').innerHTML = renderMarkdown(data.text || '');
+    setSproutPanelPath(path ? `已保存到 ${path}` : (emptyHint || '未写入文件（知识库目录不可写）'));
+}
+
+function closeSproutPanel() {
+    byId('sproutPanel').hidden = true;
+    byId('sproutPanelBody').innerHTML = '';
+    toggleThinkMenu(false);
 }
 
 async function downloadSummary() {
@@ -3002,10 +3154,35 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     }
 }
 
+// FastAPI 的 422 会把 detail 放成一个校验错误数组（每项还是个对象）。
+// 直接拼进提示就会变成 "[object Object]"——用户看到的是一句废话，
+// 真正有用的字段名和原因全被吃掉。这里统一压成一句能读的话。
+function describeErrorDetail(detail, fallbackMessage, status) {
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+        const parts = detail.map((item) => {
+            if (typeof item === 'string') return item;
+            if (!item || typeof item !== 'object') return '';
+            const field = Array.isArray(item.loc)
+                ? item.loc.filter((part) => part !== 'body').join('.')
+                : '';
+            return [field, item.msg || item.message || item.type || ''].filter(Boolean).join('：');
+        }).filter(Boolean);
+        if (parts.length) {
+            return `${fallbackMessage}（HTTP ${status}）：请求参数不合法 —— ${parts.join('；')}`;
+        }
+    }
+    if (detail && typeof detail === 'object') {
+        return `${fallbackMessage}（HTTP ${status}）：${JSON.stringify(detail).slice(0, 200)}`;
+    }
+    return `${fallbackMessage}（HTTP ${status}）`;
+}
+
 async function extractErrorMessage(response, fallbackMessage) {
     try {
         const data = await response.json();
-        return data.detail || data.error || data.message || `${fallbackMessage}（HTTP ${response.status}）`;
+        const detail = data.detail ?? data.error ?? data.message;
+        return describeErrorDetail(detail, fallbackMessage, response.status);
     } catch {
         return `${fallbackMessage}（HTTP ${response.status}）`;
     }
@@ -3106,46 +3283,6 @@ function renderDiagnostics(report, payload, healthVerdict) {
     });
     report.appendChild(document.createElement('br'));
     report.appendChild(copy);
-}
-
-let updateOffer = null;
-
-async function runStartupUpdateCheck() {
-    try {
-        const response = await fetchWithTimeout(`${API_BASE}/update/check`, {}, 10000);
-        const data = await readResponse(response, '检查更新失败');
-        if (!data.ok || !data.update_available) return;
-        const ignored = (prefs.update && prefs.update.ignored_version) || '';
-        if (ignored && ignored === data.latest_version) return;
-        updateOffer = data;
-        const notes = data.notes ? data.notes.trim().slice(0, 300) : '';
-        byId('updateBody').textContent = `发现新版本 ${data.latest_version}（当前 v${data.current_version}）。`
-            + (notes ? `\n\n更新内容（节选）：\n${notes}` : '')
-            + '\n\n确定更新会打开 GitHub 发布页，下载后替换本程序即可。';
-        byId('updateModal').hidden = false;
-    } catch {
-        // 启动自检失败不打扰：网络常态问题，托盘菜单里随时可以手动检查
-    }
-}
-
-function acceptUpdateOffer() {
-    byId('updateModal').hidden = true;
-    if (updateOffer && updateOffer.release_url) {
-        window.open(updateOffer.release_url, '_blank', 'noopener');
-    }
-}
-
-function ignoreUpdateOffer() {
-    if (updateOffer && updateOffer.latest_version) {
-        prefs.update = prefs.update || {};
-        prefs.update.ignored_version = updateOffer.latest_version;
-        schedulePersist(persistPrefs);
-    }
-    byId('updateModal').hidden = true;
-}
-
-function dismissUpdateOffer() {
-    byId('updateModal').hidden = true;
 }
 
 function showToast(message, type = 'info') {

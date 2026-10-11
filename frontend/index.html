@@ -28,11 +28,6 @@
             </div>
         </div>
 
-        <button id="mcpStatusChip" class="mcp-chip" type="button" hidden title="查看接入地址">
-            <span class="mcp-chip-dot" aria-hidden="true"></span>
-            <span>本机服务在跑 · 可让 AI 客户端直接用</span>
-        </button>
-
         <section class="config-section" aria-labelledby="modelTitle">
             <h2 id="modelTitle">总结模型</h2>
             <div class="field">
@@ -108,25 +103,13 @@
                 <div><strong>音频转写兜底</strong><small>无字幕时使用本地语音识别</small></div>
             </div>
             <label class="field">
-                <span>Whisper 模型</span>
+                <span>转写模型</span>
                 <select id="whisperModel">
-                    <option value="tiny">tiny（最快）</option>
-                    <option value="base" selected>base（默认，下载较小）</option>
-                    <option value="small">small（中文更准确）</option>
-                    <option value="medium">medium（不推荐 · 中文不如下面两档）</option>
-                    <option value="large-v3">large-v3（不推荐 · 只有多语言视频才需要）</option>
-                    <option value="turbo">turbo（不推荐 · 中文有退化，只适合多语言提速）</option>
-                    <option value="belle-turbo-zh">belle-turbo-zh（中文推荐 · 精度最好）</option>
-                    <option value="paraformer-zh">paraformer-zh（中文推荐 · 最快最准，只支持中文）</option>
+                    <option value="groq-whisper-large-v3-turbo" selected>groq-large-v3-turbo（云端 · 中文推荐 · 免下载 · 需 Groq Key）</option>
+                    <option value="groq-whisper-large-v3">groq-large-v3（云端 · 分段更粗 · 需 Groq Key）</option>
+                    <option value="paraformer-zh">paraformer-zh（本地 · 中文推荐 · 最快最准，只支持中文）</option>
+                    <option value="belle-turbo-zh">belle-turbo-zh（本地 · 中文推荐 · 精度最好）</option>
                 </select>
-            </label>
-            <div class="manual-model-row">
-                <button id="manualModelBtn" class="button ghost compact-button" type="button">手动导入模型</button>
-                <small>大模型下载慢或反复失败？点击【手动导入模型】按下载页保存文件并放入指定位置</small>
-            </div>
-            <label class="check-field">
-                <input type="checkbox" id="useGpu">
-                <span>启用 NVIDIA GPU 加速</span>
             </label>
             <label class="check-field" id="includeScreenshotsField">
                 <input type="checkbox" id="includeScreenshots">
@@ -158,23 +141,6 @@
                 <span>buvid3</span>
                 <input type="password" id="buvid3" autocomplete="off">
             </label>
-        </details>
-
-        <details id="mcpSection" class="config-section mcp-section collapsible-section">
-            <summary>让 agent 接入（MCP）</summary>
-            <p class="section-note">本程序内置 MCP 服务器：在 Cherry Studio、Codex 这类客户端里填下面的地址，就能让你的 agent 直接把视频转成字幕稿或笔记。任务仍在这台机器上跑，请先让本程序开着。</p>
-            <div class="mcp-row">
-                <code id="mcpSseUrl">http://127.0.0.1:8000/mcp/sse</code>
-                <button id="copyMcpUrlBtn" class="button ghost compact-button" type="button">复制地址</button>
-            </div>
-            <div class="mcp-row">
-                <button id="copyMcpConfigBtn" class="button ghost compact-button" type="button">复制 JSON 配置</button>
-                <small>Cherry Studio：设置 → MCP 服务器 → 添加 → 从 JSON 导入。</small>
-            </div>
-            <p class="mcp-note">可以跟 agent 说「先把这个视频转成带时间轴的文字稿」——它走 <code>transcribe_video</code> + <code>get_transcript</code>，<strong>本机不需要配 API Key</strong>，整理成什么样由客户端的模型决定；要一份现成成品笔记才用 <code>summarize_video</code>（需要 Key）。</p>
-            <p class="mcp-note">只支持 stdio 的客户端可以跑 <code>python -m backend.mcp_server</code>，它会自动找 8000–8019 上已经开着的本服务。</p>
-            <p class="mcp-note">服务只监听 <code>127.0.0.1</code>，局域网连不进来；Key 和 B 站凭据只留在本机（Windows 用系统 DPAPI 加密）。</p>
-            <p id="mcpUnavailable" class="mcp-note" hidden>这台机器没装 <code>mcp</code> 依赖，上面的地址暂时连不通（网页端和任务本身不受影响）。装齐 <code>backend/requirements.txt</code> 里的依赖后重启即可。</p>
         </details>
 
         <div class="sidebar-actions">
@@ -251,7 +217,7 @@
                 </label>
                 <label id="urlField" class="field source-input-field">
                     <span class="sr-only">视频链接</span>
-                    <input type="url" id="videoUrl" placeholder="粘贴 B 站或抖音视频链接，也支持分享文本">
+                    <input type="url" id="videoUrl" placeholder="粘贴 B 站视频链接，也支持分享文本">
                 </label>
                 <label id="fileField" class="file-picker" hidden>
                     <input type="file" id="localFile" accept="video/*,audio/*">
@@ -285,23 +251,11 @@
                 <div class="hint-actions" id="biliHintActions">
                     <button id="biliHintScanBtn" class="button secondary" type="button">扫码登录导入</button>
                     <button id="biliHintManualBtn" class="button ghost" type="button">去填写</button>
-                    <button id="douyinLoginBtn" class="button secondary" type="button" hidden>打开抖音浏览器</button>
-                    <span id="douyinLoginStatus" class="bili-login-status"></span>
                     <button id="biliHintDismissBtn" class="hint-dismiss" type="button" title="忽略，本次会话不再提醒">✕</button>
                 </div>
             </div>
-            <div id="mcpHint" class="hint-bar info" hidden>
-                <div class="hint-text">
-                    <strong>想让 AI 客户端直接帮你转视频？</strong>
-                    <span>左侧「让 agent 接入（MCP）」里就是本机地址，点一下即可复制，Cherry Studio / Codex 粘贴就能用。</span>
-                </div>
-                <div class="hint-actions">
-                    <button id="mcpHintGoBtn" class="button ghost" type="button">看地址</button>
-                    <button id="mcpHintDismissBtn" class="hint-dismiss" type="button" title="不再提醒">✕</button>
-                </div>
-            </div>
             <div class="source-meta">
-                <span id="fileInfo">支持 B 站/抖音等视频链接与最大 2 GB 的本地视频</span>
+                <span id="fileInfo">支持 B 站视频链接与最大 2 GB 的本地视频</span>
                 <span>处理在本机后端完成</span>
             </div>
         </section>
@@ -312,9 +266,25 @@
                     <span class="section-kicker">历史</span>
                     <h3 id="recentTasksTitle">最近任务</h3>
                 </div>
-                <button id="refreshRecentTasksBtn" class="button ghost compact-button" type="button">刷新</button>
+                <div class="recent-heading-actions">
+                    <button id="aggregateSproutBtn" class="button ghost compact-button" type="button">🌱 整体发芽</button>
+                    <button id="batchDeleteBtn" class="button ghost compact-button" type="button">🗑 删除</button>
+                    <button id="refreshRecentTasksBtn" class="button ghost compact-button" type="button">刷新</button>
+                </div>
+            </div>
+            <div id="aggregateBar" class="aggregate-bar" hidden>
+                <span id="aggregateHint" class="aggregate-hint">勾选要处理的笔记</span>
+                <span id="aggregateCount" class="aggregate-count">已选 0 篇</span>
+                <button id="aggregateSelectAllBtn" class="button ghost compact-button" type="button">全选</button>
+                <button id="aggregateSelectNoneBtn" class="button ghost compact-button" type="button">全不选</button>
+                <button id="aggregateStartBtn" class="button secondary compact-button" type="button" disabled>开始发芽</button>
+                <button id="aggregateDeleteBtn" class="button ghost compact-button danger-button" type="button" disabled>删除选中</button>
+                <button id="aggregateCancelBtn" class="button ghost compact-button" type="button">取消</button>
             </div>
             <div id="recentTaskList" class="recent-task-list"></div>
+            <div id="recentTasksMore" class="recent-more" hidden>
+                <button id="loadMoreTasksBtn" class="button ghost compact-button" type="button">加载更多</button>
+            </div>
         </section>
 
         <section id="progressArea" class="task-panel" aria-labelledby="progressTitle" hidden>
@@ -370,6 +340,21 @@
                     <h3 id="resultTitle">视频笔记</h3>
                 </div>
                 <div class="result-actions">
+                    <div class="think-menu">
+                        <button id="sproutNoteBtn" class="button ghost" type="button" disabled
+                                aria-haspopup="menu" aria-expanded="false">🌱 思考 ▾</button>
+                        <div id="thinkMenuList" class="think-menu-list" role="menu" hidden>
+                            <button type="button" class="think-menu-item" role="menuitem" data-think-mode="sprout">
+                                <strong>发芽</strong><span>种子 → 跨界碰撞 → 启发</span>
+                            </button>
+                            <button type="button" class="think-menu-item" role="menuitem" data-think-mode="interrogate">
+                                <strong>拷问</strong><span>挑漏洞 + 替代方案，每条附原片定位</span>
+                            </button>
+                            <button type="button" class="think-menu-item" role="menuitem" data-think-mode="quiz">
+                                <strong>自测</strong><span>生成可从笔记作答的题目</span>
+                            </button>
+                        </div>
+                    </div>
                     <button id="regenerateBtn" class="button ghost" type="button" disabled>基于转录重新生成</button>
                     <button id="copyNoteBtn" class="button ghost" type="button" disabled>复制笔记</button>
                     <label class="sr-only" for="formatSelect">下载格式</label>
@@ -397,20 +382,16 @@
                 <span id="taskDirNotice" hidden> · 任务目录 <code id="taskDirPath"></code></span>
             </div>
             <article id="markdownContent" class="markdown-body"></article>
+            <section id="sproutPanel" class="sprout-panel" hidden>
+                <div class="sprout-panel-head">
+                    <span id="sproutPanelTitle" class="sprout-panel-title">🌱 发芽报告</span>
+                    <code id="sproutPanelPath" class="sprout-panel-path"></code>
+                    <button id="sproutCloseBtn" class="button ghost" type="button">关闭</button>
+                </div>
+                <div id="sproutPanelBody" class="markdown-body"></div>
+            </section>
         </section>
     </main>
-</div>
-
-<div id="updateModal" class="modal-backdrop" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="updateTitle">
-        <h3 id="updateTitle">发现新版本</h3>
-        <p id="updateBody" class="update-body"></p>
-        <div class="modal-actions">
-            <button id="updateAcceptBtn" class="button" type="button">确定更新</button>
-            <button id="updateIgnoreBtn" class="button ghost" type="button">忽略本次更新</button>
-            <button id="updateCancelBtn" class="button ghost" type="button">取消</button>
-        </div>
-    </div>
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>

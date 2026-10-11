@@ -20,8 +20,8 @@ import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import quote, urlsplit, urlunsplit
+from typing import Any, Literal, Sequence
+from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import aiofiles
 import uvicorn
@@ -50,7 +50,7 @@ from pydantic import BaseModel, Field, SecretStr
 
 from . import paraformer_asr, secret_box
 from . import asr_process
-from . import update_check
+from . import groq_asr
 from .config_store import BiliCredentialsUnavailable, LLM_KEYS_FILE, ConfigStore
 from .llm_summarizer import (
     LONG_TRANSCRIPT_CHARACTERS,
@@ -62,7 +62,6 @@ from .llm_summarizer import (
     utf8_safe,
 )
 from .bili_login import BiliLoginManager
-from .douyin_login import DouyinLoginManager
 from .transcript import (
     TranscriptSegment,
     format_timestamp,
@@ -94,6 +93,10 @@ WHISPER_CACHE_DIR = Path(
 # 笔记的同一视频会各留一份，分开摆一眼看得清，不用靠【转录】后缀在一堆文件里认。
 NOTES_DIR_NAME = "notes"
 TRANSCRIPTS_DIR_NAME = "transcripts"
+# 成品归档根目录。默认为空 = 沿用 workspace/<folder>/（截图靠"与任务目录同级"的相对
+# 路径就地引用）。设了就把成品集中到项目外的知识库目录，此时归档会把截图复制到笔记
+# 旁边——否则 ../<task_id>/frames/ 会指向不存在的位置，图全丢。
+NOTES_OUTPUT_DIR = (os.getenv("NOTES_OUTPUT_DIR") or "").strip()
 FRONTEND_DIR = BASE_DIR / "frontend"
 APP_ICON_PATH = BASE_DIR / "sources" / "icon.png"
 FAVICON_PATH = BASE_DIR / "sources" / "icon.ico"
@@ -105,6 +108,9 @@ LARGE_UPLOAD_EXTRACT_MB = int(os.getenv("LARGE_UPLOAD_EXTRACT_MB", "300"))
 LARGE_UPLOAD_EXTRACT_BYTES = LARGE_UPLOAD_EXTRACT_MB * 1024 * 1024
 MAX_CONCURRENT_TASKS = max(1, int(os.getenv("MAX_CONCURRENT_TASKS", "1")))
 TASK_HISTORY_LIMIT = max(10, int(os.getenv("TASK_HISTORY_LIMIT", "100")))
+# 「最近任务」的分页：首屏给一页，网页端点一次「加载更多」就多要一页。
+TASK_PAGE_SIZE = 20
+TASK_PAGE_MAX = 200
 ALLOWED_MEDIA_SUFFIXES = {
     ".mp3",
     ".m4a",
@@ -118,10 +124,12 @@ ALLOWED_MEDIA_SUFFIXES = {
     ".avi",
 }
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle-turbo-zh"}
-ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"}
+# Groq 是云端转写（whisper-large-v3 系列），不进 WHISPER_MODELS：那一组会被当成
+# 本地 faster-whisper 的缓存清单展示，混进去会出现「点下载却没有对应本地模型」。
+ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"} | set(groq_asr.GROQ_ASR_MODELS)
 DOUYIN_HINT = (
-    "抖音链接解析失败。可以先点击“打开抖音浏览器”，在本机窗口完成登录/验证后重试；"
-    "也可能是媒体地址已过期，请重新提交链接。"
+    "抖音链接解析失败。本程序的抖音抓取已停用（该平台风控需浏览器上下文，"
+    "维护成本高于收益），建议把视频保存到本地后用「上传本地视频」。"
 )
 NOTE_STEP_NAME = "生成笔记"
 API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
@@ -151,6 +159,43 @@ def is_loopback_client(host: str | None) -> bool:
     if address.is_loopback:
         return True
     return bool(address.version == 6 and address.ipv4_mapped and address.ipv4_mapped.is_loopback)
+
+
+# 允许的 Host 头主机名。只认回环字面量：DNS rebinding 攻击正是靠"域名解析到
+# 127.0.0.1、但 Host 头仍是攻击者域名"来绕过单纯的回环 IP 校验——浏览器把
+# rebind 后的域名当同源，于是能读到响应。校验 Host 头是这类攻击的收口点。
+LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1", "[::1]"}
+# Starlette TestClient 的默认 Host 头（httpx 用 "testserver"）；与
+# is_loopback_client 放行的 "testclient" 对应，都是测试客户端的哨兵值。
+TEST_HOSTNAMES = {"testserver", "testclient"}
+
+
+def is_loopback_host_header(value: str | None) -> bool:
+    """Host 头必须是回环字面量（允许带端口）。
+
+    空 Host 放行：HTTP/1.0 与少数本机工具（如某些 MCP 客户端）不带 Host 头，
+    而它们本来就走回环 IP 校验，收严到"缺头即拒"会误伤正常调用。
+    """
+    if value is None:
+        return True
+    text = value.strip()
+    if not text:
+        return True
+    # 去掉端口：IPv6 形如 [::1]:8000，IPv4/主机名形如 127.0.0.1:8000
+    if text.startswith("["):
+        closing = text.find("]")
+        if closing == -1:
+            return False
+        hostname = text[: closing + 1].lower()
+        remainder = text[closing + 1 :]
+        if remainder and not remainder.startswith(":"):
+            return False
+    else:
+        hostname, _, port = text.partition(":")
+        hostname = hostname.lower()
+        if port and not port.isdigit():
+            return False
+    return hostname in LOOPBACK_HOSTNAMES or hostname in TEST_HOSTNAMES
 
 
 SECURITY_HEADERS = {
@@ -190,7 +235,14 @@ class LocalSecurityMiddleware:
             return
         client = scope.get("client")
         client_host = client[0] if isinstance(client, (tuple, list)) and client else None
-        if not is_loopback_client(client_host):
+        # Host 头必须也是回环字面量，否则视为 DNS rebinding：域名解析到 127.0.0.1
+        # 时客户端地址是回环、Host 却是攻击者域名，只查地址挡不住。
+        host_header = None
+        for key, value in scope.get("headers") or []:
+            if key == b"host":
+                host_header = value.decode("latin-1", "replace")
+                break
+        if not is_loopback_client(client_host) or not is_loopback_host_header(host_header):
             body = json.dumps(
                 {"detail": "VideoToNo 仅允许本机访问"}, ensure_ascii=False
             ).encode("utf-8")
@@ -300,7 +352,7 @@ async def run_transcription(
     CTranslate2 / sherpa-onnx 在打包环境里出过一次访问违例（崩的是整个进程，
     托盘和界面一起没，日志一个字都没留下），所以正式产物里的转写必须死在外头。
     """
-    if asr_process.use_child_process():
+    if asr_process.use_child_process() and not groq_asr.is_groq_model(model_name):
         return await asr_process.run_in_child(
             media_path, model_name, use_gpu, title, cancel_event, progress_callback
         )
@@ -317,11 +369,19 @@ async def run_transcription_local(
     cancel_event: Any,
     progress_callback: Any = None,
 ) -> dict:
-    """按所选模型路由转写引擎：paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。
+    """按所选模型路由转写引擎：Groq 走云端，paraformer-zh 走 sherpa-onnx，其余走 faster-whisper。
 
-    progress_callback(已转写秒数, 总秒数) 仅 whisper 路径支持（paraformer
+    progress_callback(已转写秒数, 总秒数) 由 whisper 与 Groq 路径支持（paraformer
     一次性出结果，且 RTF ≈ 0.05 本来就不需要心跳）。
     """
+    if groq_asr.is_groq_model(model_name):
+        return await groq_asr.transcribe(
+            media_path,
+            model_name,
+            groq_asr.resolve_api_key(config_store),
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
     if model_name == "paraformer-zh":
         return await paraformer_transcriber.transcribe(
             media_path, model_name, use_gpu, initial_prompt=title, cancel_event=cancel_event
@@ -361,7 +421,6 @@ def transcribe_progress_reporter(
 
 
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
-douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
@@ -372,12 +431,6 @@ class BilibiliCookie(BaseModel):
     sessdata: str = ""
     bili_jct: str = ""
     buvid3: str = ""
-
-
-class DouyinCookie(BaseModel):
-    """浏览器验证后短暂回传的抖音会话字段；不写入任务清单。"""
-
-    model_config = {"extra": "allow"}
 
 
 class LLMConfigPayload(BaseModel):
@@ -426,6 +479,32 @@ class LLMConfig(BaseModel):
     custom_model_name: str | None = None
 
 
+class SproutRequest(BaseModel):
+    """单篇「思考」：对整篇笔记跑一个模式，产出一份独立笔记。
+
+    ``mode`` 决定跑哪个模式（发芽 / 拷问 / 自测），默认发芽以兼容旧调用。
+    ``markdown`` 是整篇笔记正文（不按段落切片）；``title`` / ``note_path`` 用于
+    把产物落成独立笔记并与原笔记用 Obsidian 双链互连。
+    """
+
+    mode: Literal["sprout", "interrogate", "quiz"] = "sprout"
+    markdown: str
+    title: str = ""
+    note_path: str = ""
+    llm_config: LLMConfig
+
+
+class SproutAggregateRequest(BaseModel):
+    """「整体发芽」：跨多篇历史笔记找共同种子。
+
+    只传任务 ID——正文由后端自己取（优先内存里的 result.markdown，回退读任务
+    目录的 notes.md），避免把好几篇正文在前后端之间来回搬。
+    """
+
+    task_ids: list[str]
+    llm_config: LLMConfig
+
+
 class SummarizeRequest(BaseModel):
     video_url: str = ""
     upload_task_id: str | None = None
@@ -443,7 +522,6 @@ class SummarizeRequest(BaseModel):
     # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
     bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
-    douyin_cookie: DouyinCookie | None = None
     llm_config: LLMConfig
 
 
@@ -460,7 +538,6 @@ class TranscribeRequest(BaseModel):
     # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
     bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
-    douyin_cookie: DouyinCookie | None = None
 
 
 class BiliPagesRequest(BaseModel):
@@ -895,20 +972,26 @@ def task_status_payload(task_id: str, task: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/tasks")
-async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
+async def list_recent_tasks(limit: int = TASK_PAGE_SIZE) -> dict[str, Any]:
     # agent 经 /api/transcribe 提交的纯转录任务不进网页端历史：它没有 result.markdown，
-    # 而且批量取原料不应该把用户的笔记历史挤出这 20 条（过滤在截断之前）。
+    # 而且批量取原料不应该把用户的笔记历史挤出列表（过滤在截断之前）。
     # 网页端自己点的「仅转录」是用户要回看的成品，照常进历史（origin=web）。
     def is_visible(task: dict[str, Any]) -> bool:
         if task.get("output") != "transcript":
             return True
         return task.get("_origin") == "web"
 
-    ordered = sorted(
+    # 分页只在这里截断：网页端点「加载更多」就把 limit 调大，一次多给一页。
+    # 同时返回 total，前端才知道还有没有更多可加载（否则只能靠"给满一页就猜还有"）。
+    ordered_all = sorted(
         (item for item in tasks.items() if is_visible(item[1])),
         key=lambda item: str(item[1].get("created_at") or ""),
         reverse=True,
-    )[:20]
+    )
+    # limit 尊重调用方给的值（只挡住 0/负数与过大的值）：给 5 就回 5，
+    # 悄悄回一页满的会让调试的人怀疑人生。前端「加载更多」永远按页递增。
+    size = max(1, min(int(limit or TASK_PAGE_SIZE), TASK_PAGE_MAX))
+    ordered = ordered_all[:size]
     summaries: list[dict[str, Any]] = []
     for task_id, task in ordered:
         manifest = read_task_manifest(task_id)
@@ -926,7 +1009,7 @@ async def list_recent_tasks() -> dict[str, list[dict[str, Any]]]:
                 "elapsed_seconds": task_elapsed_seconds(task),
             }
         )
-    return {"tasks": summaries}
+    return {"tasks": summaries, "total": len(ordered_all), "limit": size}
 
 
 @app.get("/api/task/{task_id}")
@@ -1243,6 +1326,133 @@ async def test_llm_connection(
         return {"ok": False, "error": utf8_safe(f"初始化失败：{exc}")}
 
 
+@app.post("/api/knowledge/sprout")
+async def knowledge_sprout(request: SproutRequest) -> dict[str, Any]:
+    """对整篇笔记跑一个「思考」模式：发芽 / 拷问 / 自测，并落成独立笔记。
+
+    与生成笔记共用同一套 LLM 配置解析与脱敏，但不进任务队列：它是同步交互，
+    直接返回正文。Key 来源与生成笔记一致（显式 Key 优先，其次复用本机已存）。
+
+    产物写成 ``<原笔记名><模式后缀>.md``，放在原笔记同目录（即 Obsidian 库），
+    并在正文里写 ``[[原笔记名]]``——Obsidian 的反向链接会自动把两者连起来。
+    """
+    material = request.markdown.strip()
+    if not material:
+        raise HTTPException(status_code=400, detail="笔记内容为空，无法思考")
+    mode = request.mode
+    spec = THINK_MODES[mode]
+    config = request.llm_config
+    base_url = config.base_url or config.custom_base_url
+    model = config.model or config.custom_model_name
+    try:
+        api_key, key_source = resolve_llm_credentials(
+            model_type=config.model_type,
+            base_url=base_url,
+            api_key=config.api_key.get_secret_value(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    summarizer = LLMSummarizer(
+        model_type=config.model_type,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    runner = {
+        "sprout": summarizer.sprout_report,
+        "interrogate": summarizer.interrogate_report,
+        "quiz": summarizer.quiz_report,
+    }[mode]
+    try:
+        text = await runner(material)
+    except Exception as exc:
+        detail = redact_secrets(utf8_safe(str(exc)), api_key)
+        raise HTTPException(status_code=502, detail=f"{spec['name']}失败：{detail}") from exc
+
+    report_path, note_stem = write_think_report(text, request.title, request.note_path, mode)
+    linked = (
+        link_sprout_from_note(
+            request.note_path, report_path.stem, label=spec["link_label"]
+        )
+        if report_path
+        else False
+    )
+    return {
+        "ok": True,
+        "mode": mode,
+        "mode_name": spec["name"],
+        "text": text,
+        "report_path": str(report_path) if report_path else "",
+        "note_stem": note_stem,
+        "linked": linked,
+        "key_source": key_source,
+    }
+
+
+@app.post("/api/knowledge/sprout-aggregate")
+async def knowledge_sprout_aggregate(request: SproutAggregateRequest) -> dict[str, Any]:
+    """整体发芽：跨多篇历史笔记找**共同种子**，产出一张新知卡片写进知识库。
+
+    与单篇发芽同一套 LLM 解析 / 脱敏 / 落盘 / 双链逻辑，区别只在素材是好几篇，
+    而且多一步「先找共同种子」。这几篇没有共同内核时模型不给卡片标题，这时
+    **不落盘**，只把话说清楚返回给前端。
+    """
+    if not request.task_ids:
+        raise HTTPException(status_code=400, detail="请先勾选要做整体发芽的笔记")
+    config = request.llm_config
+    base_url = config.base_url or config.custom_base_url
+    model = config.model or config.custom_model_name
+    try:
+        api_key, key_source = resolve_llm_credentials(
+            model_type=config.model_type,
+            base_url=base_url,
+            api_key=config.api_key.get_secret_value(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    notes = collect_aggregate_notes(request.task_ids)
+    if not notes:
+        raise HTTPException(
+            status_code=400,
+            detail="勾选的任务里没有可用的笔记正文（字幕稿没有正文，无法发芽）",
+        )
+
+    summarizer = LLMSummarizer(
+        model_type=config.model_type,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    try:
+        text = await summarizer.sprout_aggregate(
+            build_aggregate_material(notes), len(notes)
+        )
+    except Exception as exc:
+        detail = redact_secrets(utf8_safe(str(exc)), api_key)
+        raise HTTPException(status_code=502, detail=f"整体发芽失败：{detail}") from exc
+
+    report_path, seed = write_aggregate_sprout_report(text, notes)
+    return {
+        "ok": True,
+        "text": text,
+        "report_path": str(report_path) if report_path else "",
+        "seed": seed,
+        "used_count": len(notes),
+        "linked_count": sum(1 for note in notes if note.get("stem")),
+        "notes": [
+            {
+                "task_id": note["task_id"],
+                "title": note["title"],
+                "in_vault": bool(note.get("stem")),
+            }
+            for note in notes
+        ],
+        "key_source": key_source,
+    }
+
+
 @app.delete("/api/llm-config")
 async def clear_llm_config() -> dict[str, Any]:
     """旧接口：只清除它刚报告的那一条，不会一次清空全部本机 Key。"""
@@ -1369,20 +1579,17 @@ async def health_check() -> dict[str, Any]:
             "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
             "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
             "openai": importlib.util.find_spec("openai") is not None,
-            # MCP 的 SSE 端点是否真的挂上了（缺 mcp 依赖时前端要说"不通"而不是给个死地址）
-            "mcp_sse": MCP_SSE_ENABLED,
         },
     }
 
 
 @app.get("/api/update/check")
 async def check_app_update() -> dict[str, Any]:
-    """启动自检用：对比 GitHub 最新 Release；连不上也回 200，前端静默不提示。
+    """更新检查已按需移除：本机 GitHub 被 /etc/hosts 屏蔽，该端点只会白等超时。
 
-    这里故意沿用系统代理的默认行为（与 CDP 那两处相反）：GitHub 恰恰是
-    常需要代理才够得着的地址，代理在场就该用。
+    保留端点本身并直接回「无更新」，是为了不把前端的旧调用变成 404 噪音。
     """
-    return await asyncio.to_thread(update_check.check_summary, app.version)
+    return {"update_available": False, "disabled": True, "latest": None}
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -1591,22 +1798,6 @@ async def bili_login_status() -> dict[str, Any]:
 @app.post("/api/bili-login/cancel")
 async def bili_login_cancel() -> dict[str, Any]:
     return await bili_login_manager.cancel()
-
-
-@app.post("/api/douyin-login/start")
-async def douyin_login_start() -> dict[str, Any]:
-    """打开独立的本机浏览器 profile，用户可手动完成抖音登录/验证。"""
-    return await douyin_login_manager.start()
-
-
-@app.get("/api/douyin-login/status")
-async def douyin_login_status() -> dict[str, Any]:
-    return await douyin_login_manager.status()
-
-
-@app.post("/api/douyin-login/cancel")
-async def douyin_login_cancel() -> dict[str, Any]:
-    return await douyin_login_manager.cancel()
 
 
 # 视频容器后缀（可能带音轨、需要时提取）；纯音频后缀直接使用
@@ -1856,7 +2047,6 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
     def should_abort() -> bool:
         return bool(task.get("_cancel_requested"))
 
-    douyin_cookie = request.douyin_cookie.model_dump() if request.douyin_cookie else None
     # 终态通知会用 title 组文案：早期失败（读凭据、取元数据）时 title 还没赋值，
     # 少了这个初值 except 分支自己会 NameError，任务就只改了内存、task.json 留在 processing
     title = request.video_url or "上传的视频"
@@ -1893,7 +2083,8 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         source_kind = (
             video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
         )
-        cookie = douyin_cookie if source_kind == VideoSource.DOUYIN else bili_cookie
+        # 抖音抓取已停用，平台字幕凭据只剩 B 站一条路
+        cookie = bili_cookie
         transcript_result = load_transcript_result(resume_dir) if resume_dir else None
         bili_pages_to_transcribe: list = []
 
@@ -2113,7 +2304,11 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     4,
                     "语音转写",
                     38,
-                    f"正在加载 {request.whisper_model}（未缓存时可能下载模型）",
+                    (
+                        f"正在上传音频到 Groq 转写（{request.whisper_model}，云端无需下载模型）"
+                        if groq_asr.is_groq_model(request.whisper_model)
+                        else f"正在加载 {request.whisper_model}（未缓存时可能下载模型）"
+                    ),
                 )
                 whisper_result = await run_transcription(
                     media_path,
@@ -2126,14 +2321,16 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     ),
                 )
                 raise_if_cancel_requested(task)
+                if groq_asr.is_groq_model(request.whisper_model):
+                    asr_source = "groq"
+                elif request.whisper_model == "paraformer-zh":
+                    asr_source = "paraformer"
+                else:
+                    asr_source = "faster_whisper"
                 transcript_result = {
                     "segments": whisper_result["segments"],
                     "language": whisper_result["language"],
-                    "source": (
-                        "paraformer"
-                        if request.whisper_model == "paraformer-zh"
-                        else "faster_whisper"
-                    ),
+                    "source": asr_source,
                 }
                 if not info.get("duration"):
                     info["duration"] = whisper_result["duration"]
@@ -2141,7 +2338,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
                     f"语音转写完成：{len(whisper_result['segments'])} 段，设备 {whisper_result['device']}"
                 )
                 append_asr_notes(task, whisper_result)
-                if whisper_result["model"] != whisper_result["requested_model"]:
+                # Groq 的 requested_model 是前端模型 id、model 是 Groq 上的真名，两者必然
+                # 不同；那条「未缓存已降级」的告警只适用于本地 faster-whisper 的缓存回退。
+                if (
+                    whisper_result["model"] != whisper_result["requested_model"]
+                    and not groq_asr.is_groq_model(request.whisper_model)
+                ):
                     task["logs"].append(
                         f"所选 Whisper {whisper_result['requested_model']} 未缓存或无法加载，"
                         f"已自动降级为本机缓存的 {whisper_result['model']}"
@@ -2317,9 +2519,19 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             model,
             request.summary_style,
         )
+        # 多分 P 合并后的时间轴按选中分 P 顺序累积，单条链接定位不到正确分 P，
+        # 此时保持纯文本。同时看两个信号：旧版 manifest 可能缺 bili_total_pages。
+        if _timestamp_page_count(info.get("bili_total_pages")) > 1 or len(
+            info.get("bili_pages") or []
+        ) > 1:
+            task["logs"].append(
+                "多分 P 笔记：时间点保留为纯文本（单条链接无法定位到正确分 P）"
+            )
+        else:
+            summary = linkify_timestamps(summary, source_url)
 
         task_dir = WORKSPACE_DIR / task_id
-        (task_dir / "notes.md").write_text(summary, encoding="utf-8")
+        write_text_atomically(task_dir / "notes.md", summary)
         archived_path = archive_note(download_stem(title, info), summary, task_id)
         if archived_path:
             task["logs"].append(f"笔记已归档：{archived_path}")
@@ -2403,6 +2615,17 @@ async def _write_atomically(path: Path, chunks: tuple[str, ...]) -> None:
     os.replace(temporary, path)
 
 
+def write_text_atomically(path: Path, content: str) -> None:
+    """同步版原子写：先写 .tmp 再 os.replace 顶上，用于归档到知识库的成品。
+
+    ``Path.write_text`` 是"先截断再写"，中途失败会留下半截文件；这些文件躺在
+    用户的 Obsidian 库里，写坏了没有第二份可以恢复。
+    """
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def friendly_task_error(
     message: str,
     *,
@@ -2425,12 +2648,8 @@ def friendly_task_error(
     if step_name == NOTE_STEP_NAME:
         return friendly_llm_error(lowered, message)
     if source == VideoSource.DOUYIN:
-        if "fresh cookies" in lowered or "challenge" in lowered or "验证码" in message:
-            return "抖音要求浏览器验证。点击输入区下方的“打开抖音浏览器”，完成登录/验证后重新提交。"
-        if "403" in lowered or "forbidden" in lowered:
-            return "抖音媒体地址已过期或被拒绝，请重新提交链接；如果仍失败，先用本机抖音浏览器完成验证。"
-        if "douyin" in lowered or "iesdouyin" in lowered or "抖音" in message:
-            return DOUYIN_HINT
+        # 抖音抓取已停用：平台检测保留（链接会被正确识别为抖音），只给出可执行的替代路径
+        return DOUYIN_HINT
     if source == VideoSource.BILIBILI and any(
         marker in lowered for marker in ("403", "412", "forbidden", "precondition")
     ):
@@ -2639,6 +2858,120 @@ def append_note_footer(
     return f"{summary.rstrip()}\n\n{footer}\n"
 
 
+# 笔记里的时间点写法：[MM:SS] 或 [MM:SS-MM:SS]（也容忍 [H:MM:SS] 与全角连接符）。
+# 外层 (?<!\[) 与末尾 (?!\() 一起保证幂等：链接化后写成 [[MM:SS]](url)，
+# 内层时间戳前面是 "["、后面是 "]"，都不会被二次包裹。
+_TIMESTAMP_PATTERN = re.compile(
+    r"(?<!\[)\[(\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—~]\s*(\d{1,3}:\d{2}(?::\d{2})?))?\](?!\()"
+)
+
+# 代码块与行内代码里的方括号不是时间点，必须原样保留。按这段切分后，
+# 奇数下标是代码片段、偶数下标是正文，只处理正文。
+_CODE_SEGMENT_PATTERN = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", re.DOTALL)
+
+
+def timestamp_seconds(value: str) -> int | None:
+    """把 MM:SS / HH:MM:SS 转成秒数；格式或取值范围不合法时返回 None。"""
+    try:
+        parts = [int(part) for part in value.split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return None if seconds > 59 else minutes * 60 + seconds
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        if minutes > 59 or seconds > 59:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+    return None
+
+
+def _youtube_video_id(parsed: Any) -> str | None:
+    """兼容 watch?v=、shorts、live、embed、v 五种链接形态。"""
+    video_id = (parse_qs(parsed.query).get("v") or [""])[-1].strip()
+    if video_id:
+        return video_id
+    for prefix in ("/shorts/", "/live/", "/embed/", "/v/"):
+        if parsed.path.startswith(prefix):
+            return parsed.path[len(prefix):].strip("/") or None
+    return None
+
+
+def seek_url(source_url: str | None, seconds: int) -> str | None:
+    """把秒数变成平台播放器的定位链接；来源无可跳转地址时返回 None。
+
+    B 站用 ?t=秒，YouTube 用 &t=秒s。链接一律丢掉分享追踪参数（trackid /
+    spm_id_from / vd_source 等），分 P 链接保留 ?p=N。
+    """
+    value = (source_url or "").strip()
+    if not value or seconds < 0:
+        return None
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").lower()
+    if not host or not parsed.path:
+        return None
+
+    if host == "bilibili.com" or host.endswith(".bilibili.com"):
+        query = {"t": str(seconds)}
+        page = (parse_qs(parsed.query).get("p") or [""])[-1]
+        if page.isdigit() and int(page) > 1:
+            query["p"] = str(int(page))
+        return urlunsplit(("https", "www.bilibili.com", parsed.path, urlencode(query), ""))
+
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+        video_id = _youtube_video_id(parsed)
+        if not video_id:
+            return None
+        return urlunsplit(
+            ("https", "www.youtube.com", "/watch", urlencode({"v": video_id, "t": f"{seconds}s"}), "")
+        )
+
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/")
+        if not video_id:
+            return None
+        return urlunsplit(("https", "youtu.be", f"/{video_id}", urlencode({"t": f"{seconds}s"}), ""))
+
+    return None
+
+
+def linkify_timestamps(markdown: str, source_url: str | None) -> str:
+    """把笔记里的时间点换成可点击跳转到原片对应位置的链接。
+
+    区间取起点（[02:29-02:57] 跳到 02:29）。写成 ``[[MM:SS]](url)`` 是为了保留
+    原来那对方括号：Markdown 里 ``[文字](链接)`` 的方括号是语法，会被渲染器吃掉，
+    而笔记的观感、以及前端「萌芽」按 ``[MM:SS-MM:SS]`` 结尾剥离标题的逻辑都依赖它。
+
+    来源是本地文件等没有可跳转地址的情形原样返回；代码块与行内代码里的时间点
+    也保持原样。
+    """
+    if not markdown or not source_url:
+        return markdown
+
+    def replace(match: re.Match[str]) -> str:
+        seconds = timestamp_seconds(match.group(1))
+        if seconds is None:
+            return match.group(0)
+        url = seek_url(source_url, seconds)
+        if not url:
+            return match.group(0)
+        return f"[{match.group(0)}]({url})"
+
+    parts = _CODE_SEGMENT_PATTERN.split(markdown)
+    for index in range(0, len(parts), 2):
+        parts[index] = _TIMESTAMP_PATTERN.sub(replace, parts[index])
+    return "".join(parts)
+
+
+def _timestamp_page_count(value: Any) -> int:
+    """把 manifest 里的分 P 计数安全转成 int；脏数据当作 0，绝不因此崩掉任务。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 SAFE_NAME_LIMIT = 80
 
 
@@ -2681,24 +3014,359 @@ def rewrite_note_image_refs(content: str, prefix: str) -> str:
     )
 
 
+def notes_output_root(folder: str) -> Path:
+    """成品（笔记 / 转录稿）的归档根目录。
+
+    未配置 NOTES_OUTPUT_DIR：workspace/<folder>/，与历史行为一致。
+    已配置：笔记直接放根目录，转录稿放 <根>/transcripts/ —— 两者仍分开摆。
+    """
+    if not NOTES_OUTPUT_DIR:
+        return WORKSPACE_DIR / folder
+    base = Path(NOTES_OUTPUT_DIR).expanduser()
+    return base if folder == NOTES_DIR_NAME else base / folder
+
+
+def resolve_note_in_vault(note_path: str) -> Path | None:
+    """把客户端传来的 note_path 收口到知识库目录内。不在库内一律返回 None。
+
+    落盘（写报告）与回写（补双链）都按这个判断走：note_path 是请求体里的字符串，
+    不校验就等于允许调用方指定任意可写目录——写报告按 note_path.parent 落盘、
+    补双链对任意已存在文件追加，两条路都成了任意文件写。
+    """
+    text = (note_path or "").strip()
+    if not text:
+        return None
+    try:
+        candidate = Path(text).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    for folder in (NOTES_DIR_NAME, TRANSCRIPTS_DIR_NAME):
+        try:
+            if candidate.parent == notes_output_root(folder).resolve():
+                return candidate
+        except (OSError, RuntimeError):
+            continue
+    return None
+
+
+SPROUT_REPORT_SUFFIX = " · 发芽报告"
+
+# 单篇「思考」的三个模式。每个模式的产物都是独立一篇笔记，区别只在这几处文案：
+#   suffix         文件名后缀（发芽沿用旧后缀，已有笔记里的双链才不会变死链）
+#   fallback_title 模型没给标题时的兜底
+#   footer         文末那行来源说明
+#   link_label     追加到原笔记末尾的回链标签
+#   name           API / 前端用的中文名
+THINK_MODES: dict[str, dict[str, str]] = {
+    "sprout": {
+        "suffix": SPROUT_REPORT_SUFFIX,
+        "fallback_title": "# 🌱 新知卡片",
+        "footer": "由 VideoToNo 发芽生成（按「得到大脑」发芽模式：种子 → 跨界碰撞 → 启发）",
+        "link_label": "发芽报告",
+        "name": "发芽",
+    },
+    "interrogate": {
+        "suffix": " · 拷问",
+        "fallback_title": "# ⚔️ 拷问",
+        "footer": "由 VideoToNo 拷问生成（按「得到大脑」拷问模式：挑漏洞 + 强制替代方案，"
+        "每条判断都附了原片定位）",
+        "link_label": "拷问",
+        "name": "拷问",
+    },
+    "quiz": {
+        "suffix": " · 自测",
+        "fallback_title": "# 🎯 自测",
+        "footer": "由 VideoToNo 自测生成（题目与答案，答案里附了原片定位）",
+        "link_label": "自测",
+        "name": "自测",
+    },
+}
+
+
+def write_think_report(
+    report: str, title: str, note_path: str, mode: str = "sprout"
+) -> tuple[Path | None, str]:
+    """把「思考」产物（发芽 / 拷问 / 自测）落成一篇独立笔记，并与原笔记双链互连。
+
+    报告里写 ``[[原笔记名]]``：Obsidian 会自动在原笔记的「反向链接」面板里列出它，
+    这就是两个文件被连起来的方式（不需要改动原笔记也能看到）。
+
+    模型输出的第一行就是它的标题（``# 🌱 新知卡片：…`` / ``# ⚔️ 拷问：…`` /
+    ``# 🎯 自测：…``），这里只负责把「原笔记」双链插到标题下面，不再自己造标题。
+
+    返回 ``(报告路径, 原笔记名)``；写盘失败返回 ``(None, "")``，不影响本次结果本身。
+    """
+    spec = THINK_MODES.get(mode) or THINK_MODES["sprout"]
+    try:
+        note_file = resolve_note_in_vault(note_path)
+        if note_file is not None and not note_file.is_file():
+            note_file = None
+        stem = note_file.stem if note_file else _safe_filename(title or "视频笔记")
+        archive_root = note_file.parent if note_file else notes_output_root(NOTES_DIR_NAME)
+        archive_root.mkdir(parents=True, exist_ok=True)
+        heading = title.strip() or stem
+        lines = report.strip().splitlines()
+        if lines and lines[0].lstrip().startswith("#"):
+            card_title, body = lines[0].strip(), lines[1:]
+        else:
+            card_title, body = f"{spec['fallback_title']}：《{heading}》", lines
+        # 模型常在标题后留一个空行，这里吃掉，免得标题和双链之间空两行
+        while body and not body[0].strip():
+            body.pop(0)
+        content = "\n".join(
+            [
+                card_title,
+                "",
+                f"> 原笔记：[[{stem}]]",
+                "",
+                *body,
+                "",
+                "---",
+                spec["footer"],
+                "",
+            ]
+        )
+        target = archive_root / f"{stem}{spec['suffix']}.md"
+        write_text_atomically(target, content)
+        return target, stem
+    except OSError:
+        return None, ""
+
+
+def write_sprout_report(
+    report: str, title: str, note_path: str
+) -> tuple[Path | None, str]:
+    """发芽模式的落盘（历史调用点与测试仍在用这个名字）。"""
+    return write_think_report(report, title, note_path, "sprout")
+
+
+def link_sprout_from_note(
+    note_path: str, report_stem: str, label: str = "发芽报告"
+) -> bool:
+    """在原笔记末尾补一行指向发芽产物的双链，让双向跳转都能点。
+
+    报告 → 原笔记的链接（写在报告里）已经能让原笔记的反向链接面板显示报告；
+    这一行是反向的显式出口。幂等：笔记里已经提到过报告名就不再重复追加。
+
+    原笔记是用户唯一的一份数据，因此这里先用临时文件写完再 ``os.replace`` 顶上，
+    并且先留一份 ``.bak``——直接 ``write_text`` 是"先截断再写"，写到一半崩溃/断电
+    就把笔记本身弄没了，而这不是本程序有权造成的结果。
+    """
+    if not report_stem:
+        return False
+    note_file = resolve_note_in_vault(note_path)
+    if note_file is None or not note_file.is_file():
+        return False
+    try:
+        text = note_file.read_text(encoding="utf-8")
+        if report_stem in text:
+            return True
+        backup = note_file.with_name(note_file.name + ".bak")
+        try:
+            shutil.copy2(note_file, backup)
+        except OSError:
+            pass
+        payload = f"{text.rstrip()}\n\n🌱 {label}：[[{report_stem}]]\n"
+        temporary = note_file.with_name(note_file.name + ".tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, note_file)
+        return True
+    except OSError:
+        return False
+
+
+AGGREGATE_SPROUT_MAX_NOTES = 8
+AGGREGATE_SPROUT_NOTE_CHARS = 1500
+
+
+def _note_stem_for_task(task_id: str, title: str) -> tuple[str | None, Path | None]:
+    """这篇任务的笔记是不是在知识库里？是的话返回 (文件名主干, 绝对路径)。
+
+    归档路径可能指向任意目录（历史里混着当初跑测试、落在 /tmp 的任务），所以只有
+    真的落在当前知识库根目录下才算「可双链」，其余只当素材、不生成死链。
+    """
+    task = tasks.get(task_id) or {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    root = notes_output_root(NOTES_DIR_NAME)
+    archived = str(result.get("archived_path") or "").strip()
+    if archived:
+        path = Path(archived).expanduser()
+        try:
+            if path.resolve().parent == root.resolve() and path.is_file():
+                return path.stem, path
+        except OSError:
+            pass
+    # 回退：按标题猜知识库里的文件名（老任务没有 archived_path）
+    guess = root / f"{_safe_filename(title)}.md"
+    if guess.is_file():
+        return guess.stem, guess
+    return None, None
+
+
+def collect_aggregate_notes(task_ids: Sequence[str]) -> list[dict[str, Any]]:
+    """把勾选的历史任务整理成整体发芽的素材。
+
+    三件事：① 正文优先取内存里的 result.markdown，回退读任务目录的 notes.md
+    （服务重启后内存里可能已经没有了）；② 同一篇笔记只保留一次——同一条视频
+    跑过多遍时标题和归档名都一样，重复素材会把「共同种子」带偏；
+    ③ 逐篇截断，避免八篇长笔记把上下文撑爆。
+    """
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for task_id in task_ids:
+        if len(collected) >= AGGREGATE_SPROUT_MAX_NOTES:
+            break
+        try:
+            directory = task_directory(task_id)
+        except ValueError:
+            continue
+        task = tasks.get(task_id) or {}
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        markdown = str(result.get("markdown") or "").strip()
+        if not markdown:
+            try:
+                markdown = (directory / "notes.md").read_text(encoding="utf-8").strip()
+            except OSError:
+                markdown = ""
+        if not markdown:
+            continue
+        manifest = read_task_manifest(task_id)
+        title = (
+            str(result.get("title") or "").strip()
+            or str(manifest.get("title") or "").strip()
+            or "未命名笔记"
+        )
+        stem, path = _note_stem_for_task(task_id, title)
+        key = stem or f"title:{title}"
+        if key in seen:
+            continue
+        seen.add(key)
+        collected.append(
+            {
+                "task_id": task_id,
+                "title": title,
+                "markdown": markdown[:AGGREGATE_SPROUT_NOTE_CHARS],
+                "stem": stem,
+                "path": str(path) if path else "",
+            }
+        )
+    return collected
+
+
+def build_aggregate_material(notes: Sequence[dict[str, Any]]) -> str:
+    """把多篇笔记拼成给模型看的素材（分篇编号带标题，避免串味）。"""
+    return "\n\n".join(
+        f"【第 {index} 篇 · {note['title']}】\n{note['markdown']}"
+        for index, note in enumerate(notes, start=1)
+    )
+
+
+def aggregate_report_stem(notes: Sequence[dict[str, Any]]) -> str:
+    """整体发芽卡片的文件名主干——**按选中的笔记定，不按种子概括定**。
+
+    种子是模型每次现写的，同一批笔记两次能给出一句措辞完全不同的概括。要是拿它
+    当文件名，覆盖就永远不生效：文件越堆越多，每篇原笔记末尾的回链也跟着一条条
+    加下去（实测同一批笔记跑四次长出四份文件、四条回链）。按笔记定名，同一批
+    笔记反复发芽才会稳定覆盖同一份，回链也保持一条。
+    """
+    stems = sorted({note["stem"] for note in notes if note.get("stem")})
+    if not stems:
+        stems = [_safe_filename(str(notes[0]["title"])) if notes else "未命名"]
+    head = stems[0] if len(stems) == 1 else f"{stems[0]}等{len(stems)}篇"
+    return f"整体发芽 · {_safe_filename(head)}"
+
+
+def write_aggregate_sprout_report(
+    report: str, notes: Sequence[dict[str, Any]]
+) -> tuple[Path | None, str]:
+    """把整体发芽的新知卡片落盘，并与每一篇原笔记双链互连。
+
+    只有真产出卡片（首行是 ``# 🌱 新知卡片：``）才落盘——模型判断「这几篇没有
+    共同种子」时不会输出那个标题，此时不生成文件，免得往知识库里塞一篇空东西。
+
+    返回 ``(报告路径, 种子概括)``；不落盘时返回 ``(None, "")``。
+    """
+    lines = report.strip().splitlines()
+    if not lines or not lines[0].lstrip().startswith("#"):
+        return None, ""
+    card_title = lines[0].strip()
+    seed = card_title.split("：", 1)[-1].strip() if "：" in card_title else card_title
+    body = lines[1:]
+    while body and not body[0].strip():
+        body.pop(0)
+
+    linked = [note for note in notes if note.get("stem")]
+    origin = "｜".join(f"[[{note['stem']}]]" for note in linked) or "（均不在知识库目录）"
+    try:
+        root = notes_output_root(NOTES_DIR_NAME)
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / f"{aggregate_report_stem(notes)}.md"
+        write_text_atomically(
+            target,
+            "\n".join(
+                [
+                    card_title,
+                    "",
+                    f"> 原笔记（{len(linked)} 篇）：{origin}",
+                    "",
+                    *body,
+                    "",
+                    "---",
+                    "由 VideoToNo 整体发芽生成"
+                    "（按「得到大脑」发芽模式：跨篇种子 → 跨界碰撞 → 启发）",
+                    "",
+                ]
+            ),
+        )
+        for note in linked:
+            link_sprout_from_note(note["path"], target.stem, label="整体发芽")
+        return target, seed
+    except OSError:
+        return None, ""
+
+
+def _relocate_note_images(
+    content: str, archive_root: Path, stem: str, task_id: str
+) -> str:
+    """按归档位置决定截图引用怎么改写（详见 archive_note 的说明）。"""
+    if archive_root.is_relative_to(WORKSPACE_DIR):
+        # 归档与任务目录同级：就地引用，不复制文件
+        return rewrite_note_image_refs(content, f"../{task_id}/")
+    frames_src = WORKSPACE_DIR / task_id / FRAMES_DIR_NAME
+    if not frames_src.is_dir():
+        return content
+    assets_dir = archive_root / f"{stem}.assets"
+    try:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        for frame in sorted(frames_src.iterdir()):
+            if frame.is_file():
+                shutil.copy2(frame, assets_dir / frame.name)
+    except OSError:
+        # 复制失败退回原引用：正文照常归档，比整篇丢掉强
+        return content
+    return NOTE_IMAGE_REF_RE.sub(
+        lambda match: f"{match.group(1)}./{assets_dir.name}/{match.group(2)})",
+        content,
+    )
+
+
 def archive_note(
     title: str,
     content: str,
     task_id: str | None = None,
     folder: str = NOTES_DIR_NAME,
 ) -> Path | None:
-    """把产物按标题命名归档到 workspace/<folder>/ 下（重名自动加序号），便于集中回顾。
+    """把产物按标题命名归档（重名自动加序号），便于集中回顾。
 
-    默认 notes/；纯转录走 transcripts/，与笔记分开摆。
+    归档位置默认 workspace/<folder>/；设 NOTES_OUTPUT_DIR 就改到项目外的知识库目录。
 
-    截图不复制：归档在 workspace/ 的子目录下，与任务目录同级，引用改写成
-    ../<task_id>/frames/ 就能就地看图，代价是删掉任务后归档里的图失效。
+    截图引用有两种处理：归档在 workspace 内时改写成 ../<task_id>/frames/ 就地引用、
+    不复制文件；归档在 workspace 外时把该任务的 frames/ 复制到 <笔记名>.assets/，
+    改写成 ./<笔记名>.assets/，让知识库自包含（删掉任务目录、换机器都不丢图）。
 
     返回归档路径；写入失败时返回 None（不影响任务本身）。
     """
-    archive_root = WORKSPACE_DIR / folder
-    if task_id:
-        content = rewrite_note_image_refs(content, f"../{task_id}/")
+    archive_root = notes_output_root(folder)
     try:
         archive_root.mkdir(parents=True, exist_ok=True)
         safe = _safe_filename(title)
@@ -2707,8 +3375,18 @@ def archive_note(
         while candidate.exists():
             candidate = archive_root / f"{safe}-{index}.md"
             index += 1
-        candidate.write_text(content, encoding="utf-8")
-        return candidate
+        if task_id:
+            content = _relocate_note_images(content, archive_root, candidate.stem, task_id)
+        # 用独占创建收口"检查是否存在 → 写入"之间的窗口：两个任务同时归档同名笔记时，
+        # candidate.exists() 都返回 False，后写的那个会把先写的覆盖掉。
+        while True:
+            try:
+                with open(candidate, "x", encoding="utf-8") as handle:
+                    handle.write(content)
+                return candidate
+            except FileExistsError:
+                candidate = archive_root / f"{safe}-{index}.md"
+                index += 1
     except OSError:
         return None
 
@@ -2808,19 +3486,6 @@ def restore_tasks_from_workspace() -> None:
 
 
 restore_tasks_from_workspace()
-
-
-# MCP 端点：SSE 传输（/mcp/sse，供 Cherry Studio 等 MCP 客户端接入）
-MCP_SSE_ENABLED = False
-try:
-    from .mcp_server import use_in_process_backend, mcp as mcp_app
-    # 同进程调用端点函数：HTTP 自调会被 SSE 长连接阻塞（自调死锁）
-    use_in_process_backend()
-    app.mount("/mcp", mcp_app.sse_app())
-    MCP_SSE_ENABLED = True
-except ImportError:
-    # mcp 依赖未安装时跳过，不影响主服务
-    pass
 
 
 @app.get("/icon.png", include_in_schema=False)

@@ -4,9 +4,10 @@
   - 控制台窗口显示地址，Ctrl+C 退出
 
 打包模式（PyInstaller onefile，--noconsole）：
-  - 无控制台窗口，服务启动后驻留系统托盘
-  - 托盘菜单：打开界面 / 查看日志 / 退出
+  - 无控制台窗口，服务启动后前台驻留（Ctrl+C 或结束进程退出）
   - 日志写入工作目录的 _app.log
+
+注：托盘图标与「检查更新」已按需移除（本机用源码模式跑 uvicorn，launcher 不在链路上）。
 """
 
 from __future__ import annotations
@@ -23,9 +24,6 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
-
-from backend import update_check
-from backend.update_check import GITHUB_LATEST_RELEASE_API, version_tuple
 
 VERSION = "1.4.5"
 DEFAULT_PORT = 8000
@@ -123,7 +121,7 @@ def start_server(port: int) -> tuple[Any, threading.Thread]:
     """在线程中启动 uvicorn，返回 (server, thread)。"""
     import uvicorn
 
-    # 让挂载的 MCP 端点（/mcp/sse）自调命中实际端口
+    # 后端自调用端点时需要知道自己挂在哪个端口（ASR 子进程与静态资源都读它）
     os.environ.setdefault("VIDEOTONOTES_BACKEND_URL", f"http://127.0.0.1:{port}")
     from backend.main import app
 
@@ -221,95 +219,6 @@ def open_in_shell(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def latest_release_info() -> dict[str, str]:
-    """读取 GitHub 最新 Release；只在用户点击托盘菜单时调用。
-
-    委托到 update_check：版本比较与接口地址单一来源。urlopen 仍发生在本模块
-    的测试可见路径上（test_launcher 钉住了 url 与 timeout=5）。
-    """
-    info = update_check.fetch_latest_release(VERSION)
-    return {"tag_name": info["tag_name"], "html_url": info["html_url"]}
-
-
-def show_update_message(message: str, title: str = APP_NAME, flags: int = 0x40) -> int:
-    """显示更新提示；开发模式/非 Windows 下退回日志，便于测试。"""
-    if sys.platform == "win32":
-        import ctypes
-
-        return int(ctypes.windll.user32.MessageBoxW(None, message, title, flags))
-    print(f"{title}: {message}", file=sys.stderr, flush=True)
-    return 0
-
-
-def check_for_updates(_icon: Any = None, _item: Any = None) -> None:
-    """手动检查 GitHub Release，不阻塞启动，也不在启动时联网。"""
-    try:
-        release = latest_release_info()
-        if version_tuple(release["tag_name"]) <= version_tuple(VERSION):
-            show_update_message(f"当前已是最新版本（v{VERSION}）。", flags=0x40)
-            return
-        message = (
-            f"检测到新版本 {release['tag_name']}（当前 v{VERSION}）。\n\n"
-            "是否打开 GitHub Release 页面查看并更新？"
-        )
-        result = show_update_message(message, title=f"{APP_NAME} 更新", flags=0x24)
-        if result == 6:  # IDYES
-            webbrowser.open(release["html_url"])
-    except Exception as error:
-        show_update_message(f"检查更新失败：{error}\n请稍后重试。", title=f"{APP_NAME} 更新", flags=0x10)
-
-
-def tray_icon_image() -> Any:
-    from PIL import Image
-
-    if is_frozen():
-        resource = Path(getattr(sys, "_MEIPASS", "")) / "sources" / "icon.png"
-    else:
-        resource = base_dir() / "sources" / "icon.png"
-    if resource.is_file():
-        return Image.open(resource).resize((64, 64))
-    # 兜底：生成一个简单占位图标
-    image = Image.new("RGB", (64, 64), (69, 200, 144))
-    return image
-
-
-def run_tray(url: str, workspace: Path, server: Any) -> int:
-    import pystray
-
-    log_path = workspace / "_app.log"
-    print(f"VideoToNo v{VERSION} 已启动: {url}（托盘图标可退出）", flush=True)
-
-    def on_open(_icon: Any, _item: Any) -> None:
-        webbrowser.open(url)
-
-    def on_logs(_icon: Any, _item: Any) -> None:
-        if log_path.is_file():
-            open_in_shell(log_path)
-
-    def on_quit(_icon: Any, _item: Any) -> None:
-        server.should_exit = True
-        _icon.stop()
-
-    menu = pystray.Menu(
-        pystray.MenuItem("打开界面", on_open, default=True),
-        pystray.MenuItem("查看日志", on_logs),
-        pystray.MenuItem("检查更新", check_for_updates),
-        pystray.MenuItem("退出", on_quit),
-    )
-    icon = pystray.Icon("videotono", tray_icon_image(), f"{APP_NAME} · {url}", menu)
-    # 任务结果通知：把 backend 的完成/失败事件接到托盘气泡（Windows 通知）
-    try:
-        from backend import main as backend_main
-
-        backend_main.register_task_notify(
-            lambda title, message: icon.notify(message, f"VideoToNo · {title}")
-        )
-    except Exception:
-        pass  # 通知注册失败不影响服务
-    icon.run()
-    return 0
-
-
 # --------------------------------------------------------------------------
 # 入口
 # --------------------------------------------------------------------------
@@ -352,7 +261,14 @@ def main() -> int:
             return 1
         if not no_browser:
             webbrowser.open(url)
-        return run_tray(url, workspace, server)
+        # 无托盘：前台驻留到进程被结束（关闭窗口 / Ctrl+C / 结束进程）
+        print(f"{APP_NAME} 已启动: {url}（关闭窗口或 Ctrl+C 退出）", flush=True)
+        try:
+            while not getattr(server, "should_exit", False):
+                time.sleep(1)
+        except KeyboardInterrupt:
+            server.should_exit = True
+        return 0
     except Exception as error:
         show_error(f"启动失败：{error}\n日志：{log_path}")
         return 1

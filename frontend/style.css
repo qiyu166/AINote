@@ -560,6 +560,75 @@ input[type="checkbox"] {
 .recent-task-status.cancelled { color: var(--text-muted); }
 .recent-task-status.uploaded, .recent-task-status.pending { color: var(--text-muted); }
 
+/* ---- 结果区工具栏的「🌱 思考 ▾」下拉 ---- */
+.think-menu { position: relative; display: inline-flex; }
+.think-menu-list {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    min-width: 260px;
+    padding: 6px;
+    display: grid;
+    gap: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+.think-menu-item {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: calc(var(--radius) - 2px);
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+.think-menu-item:hover { background: var(--blue-soft); }
+.think-menu-item:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.think-menu-item strong { font-size: 13px; }
+.think-menu-item span { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+
+/* ---- 整体发芽：在最近任务里勾选多篇 ---- */
+.recent-heading-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.aggregate-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: -4px 0 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--blue);
+    border-radius: var(--radius);
+    background: var(--blue-soft);
+}
+.aggregate-hint { flex: 1 1 160px; min-width: 0; font-size: 11px; color: var(--text-muted); }
+.aggregate-count { font-size: 11px; font-weight: 600; color: var(--blue); white-space: nowrap; }
+/* 勾选模式下左列多出一个复选框：行内网格跟着加一列 */
+.recent-task-row.aggregate-mode { grid-template-columns: auto minmax(0, 1fr); }
+.recent-task-row.aggregate-mode.is-picked { background: var(--blue-soft); }
+.recent-task-row.is-unavailable { opacity: 0.45; }
+.recent-task-row.is-unavailable .recent-task-item { cursor: not-allowed; }
+.aggregate-check {
+    width: 16px;
+    height: 16px;
+    margin: 0 4px 0 8px;
+    align-self: center;
+    accent-color: var(--blue);
+    cursor: pointer;
+}
+.aggregate-check:disabled { cursor: not-allowed; }
+/* 批量删除是破坏性动作，按钮用红色区分，避免和「开始发芽」点混 */
+.danger-button { color: var(--red); border-color: var(--red); }
+.danger-button:hover:not(:disabled) { background: var(--red-soft); }
+.danger-button:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 「加载更多」贴在列表下方；列表本身是滚动区，这里保持在滚动区外不被截断 */
+.recent-more { display: flex; justify-content: center; padding: 10px 0 2px; }
+.recent-more .compact-button { min-width: 100%; }
+
 .progress-summary { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .progress-summary strong { min-width: 42px; text-align: right; font: 700 14px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .elapsed-label { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
@@ -756,4 +825,37 @@ input[type="checkbox"] {
     justify-content: flex-end;
     flex-wrap: wrap;
     margin-top: 14px;
+}
+
+/* ---- 发芽：整篇笔记的跨界关联报告 ---- */
+.sprout-panel {
+    margin: 18px 0 8px;
+    padding: 14px 18px;
+    border: 1px solid var(--blue);
+    border-left-width: 4px;
+    background: var(--blue-soft);
+    border-radius: var(--radius);
+}
+.sprout-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--blue-soft);
+}
+.sprout-panel-title {
+    font-weight: 600;
+    color: var(--blue);
+}
+.sprout-panel-path {
+    flex: 1 1 240px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text-dim, var(--text));
+    overflow-wrap: anywhere;
+}
+.sprout-panel-head .button {
+    margin-left: auto;
 }

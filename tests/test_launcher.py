@@ -1,13 +1,9 @@
-import json
-from pathlib import Path
+"""启动器测试。
 
+注：「托盘图标 / 检查更新」已按需移除（本机用源码模式跑 uvicorn，launcher 不在链路上），
+对应的 version_tuple / latest_release_info / check_for_updates 测试一并删掉。
+"""
 import launcher
-
-
-def test_version_tuple_accepts_release_tags() -> None:
-    assert launcher.version_tuple("v1.1.4") == (1, 1, 4)
-    assert launcher.version_tuple("1.2.0-rc1") == (1, 2, 0)
-    assert launcher.version_tuple("invalid") == (0,)
 
 
 def test_server_alive_requires_matching_version(monkeypatch) -> None:
@@ -39,44 +35,7 @@ def test_configure_runtime_dirs_creates_custom_workspace(monkeypatch, tmp_path) 
     assert custom.is_dir()
 
 
-def test_latest_release_info_reads_tag_and_url(monkeypatch) -> None:
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(
-                {"tag_name": "v1.2.0", "html_url": "https://github.com/example/release"}
-            ).encode("utf-8")
-
-    captured = {}
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        return FakeResponse()
-
-    monkeypatch.setattr(launcher.urllib.request, "urlopen", fake_urlopen)
-    assert launcher.latest_release_info() == {
-        "tag_name": "v1.2.0",
-        "html_url": "https://github.com/example/release",
-    }
-    assert captured == {"url": launcher.GITHUB_LATEST_RELEASE_API, "timeout": 5}
-
-
-def test_check_for_updates_opens_new_release_after_confirmation(monkeypatch) -> None:
-    opened: list[str] = []
-    monkeypatch.setattr(
-        launcher,
-        "latest_release_info",
-        lambda: {"tag_name": "v9.9.9", "html_url": "https://github.com/example/release"},
-    )
-    monkeypatch.setattr(launcher, "show_update_message", lambda *args, **kwargs: 6)
-    monkeypatch.setattr(launcher.webbrowser, "open", opened.append)
-
-    launcher.check_for_updates()
-
-    assert opened == ["https://github.com/example/release"]
+def test_tray_and_update_check_are_gone() -> None:
+    """按需移除的模块不得回潮：缺了它们后 launcher 仍要能导入。"""
+    for name in ("run_tray", "tray_icon_image", "check_for_updates", "latest_release_info"):
+        assert not hasattr(launcher, name), f"{name} 已移除，不该再出现"

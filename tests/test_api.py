@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import launcher
-from backend import bili_login, douyin_login, main
+from backend import bili_login, main
 from backend.config_store import BILI_CREDENTIALS_FILE, ConfigStore
 from backend.llm_summarizer import LLMSummarizer, utf8_safe
 from backend.transcript import TranscriptSegment
@@ -23,6 +23,17 @@ from backend.video_processor import (
     SubtitleResult,
     VideoProcessor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_notes_output_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离成品归档目录。
+
+    本机 .env 里可能配了 NOTES_OUTPUT_DIR（把笔记收到项目外的知识库目录），它在
+    import 时就生效了。不隔离的话，所有走 archive_note 的测试都会往用户真实的知识库
+    目录里写文件。需要验证该配置的用例自己再 setattr 一次即可覆盖。
+    """
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", "")
 
 
 @pytest.mark.asyncio
@@ -130,16 +141,14 @@ def test_health_and_frontend_are_served() -> None:
     assert health.json()["version"] == launcher.VERSION
     assert health.json()["service"] == "VideoToNo"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
-    # 前端 MCP 卡片靠这个字段决定"给地址"还是"说本机没装依赖"
-    assert health.json()["dependencies"]["mcp_sse"] is True
+    # MCP 已按需移除：健康接口不再报告 mcp_sse 字段
+    assert "mcp_sse" not in health.json()["dependencies"]
     page = client.get("/")
     assert page.status_code == 200
     assert "VideoToNo" in page.text
-    assert 'id="mcpSseUrl"' in page.text
-    assert 'id="mcpStatusChip" class="mcp-chip" type="button" hidden' in page.text
-    assert 'id="mcpHint" class="hint-bar info" hidden' in page.text
-    assert 'id="copyMcpConfigBtn"' in page.text
-    assert 'id="mcpUnavailable" class="mcp-note" hidden' in page.text
+    # MCP 相关的 UI（接入卡片 / 状态芯片 / 提示条）已按需移除
+    for removed in ("mcpSseUrl", "mcpStatusChip", "mcpHint", "copyMcpConfigBtn", "mcpUnavailable"):
+        assert f'id="{removed}"' not in page.text, f"{removed} 已移除，不该再出现"
     assert "cdn.jsdelivr.net" not in page.text
     assert "vendor/marked-18.0.9.umd.js" in page.text
     assert "vendor/dompurify-3.4.13.min.js" in page.text
@@ -326,6 +335,209 @@ def test_note_metadata_and_footer_are_deterministic() -> None:
     assert "笔记风格：详细复原（仅视频内容）" in footer
 
 
+def test_linkify_timestamps_links_sections_to_playback_position() -> None:
+    bilibili = (
+        "https://www.bilibili.com/video/BV1cNYP6wEiB/"
+        "?trackid=web_pegasus_0.router&spm_id_from=333.1007&vd_source=39dfadc1"
+    )
+    out = main.linkify_timestamps("## 开场 [00:00-00:11]\n\n- 正文 [02:29] 说明\n", bilibili)
+    # 区间取起点；正文行内时间戳同样转链接
+    assert "](https://www.bilibili.com/video/BV1cNYP6wEiB/?t=0)" in out
+    assert "](https://www.bilibili.com/video/BV1cNYP6wEiB/?t=149)" in out
+    # 分享追踪参数必须清掉
+    assert "trackid" not in out and "vd_source" not in out
+
+
+def test_linkify_timestamps_keeps_brackets_and_stays_idempotent() -> None:
+    url = "https://www.bilibili.com/video/BV1xx411c7mD"
+    out = main.linkify_timestamps("## 段 [00:00-00:11]\n", url)
+    # 方括号必须留住：Markdown 的 [文字](链接) 会把方括号当语法吃掉，而前端「萌芽」
+    # 按 [MM:SS-MM:SS] 结尾剥离标题，靠的就是它。
+    assert "[[00:00-00:11]](https://www.bilibili.com/video/BV1xx411c7mD?t=0)" in out
+    assert main.linkify_timestamps(out, url) == out
+
+
+def test_linkify_timestamps_skips_code_and_out_of_range_values() -> None:
+    url = "https://www.bilibili.com/video/BV1xx411c7mD"
+    fenced = "```\n[00:00] 代码块\n```\n\n正文 [01:00]\n"
+    out = main.linkify_timestamps(fenced, url)
+    assert "[00:00] 代码块" in out  # 代码块原样保留
+    assert out.count("](http") == 1  # 正文那一处仍然转链接
+    assert main.linkify_timestamps("`[00:00]`", url) == "`[00:00]`"
+    # 99 秒 / 99 分不是合法时间点，不能生成跳转
+    assert main.linkify_timestamps("[99:99]", url) == "[99:99]"
+    assert main.timestamp_seconds("99:99") is None
+    assert main.timestamp_seconds("1:02:03") == 3723
+
+
+def test_linkify_timestamps_keeps_local_notes_untouched() -> None:
+    body = "## 开场 [00:00-00:11]\n"
+    assert main.linkify_timestamps(body, None) == body
+    assert main.linkify_timestamps(body, "/Users/someone/video.mp4") == body
+
+
+def test_linkify_timestamps_keeps_footnotes() -> None:
+    url = "https://www.bilibili.com/video/BV1xx411c7mD"
+    once = main.linkify_timestamps("## 段 [00:46]\n\n脚注[^1]\n", url)
+    assert once.count("](http") == 1
+    assert "[^1]" in once
+
+
+def test_seek_url_handles_platforms_and_pages() -> None:
+    assert main.seek_url("https://youtu.be/dQw4w9WgXcQ", 149) == (
+        "https://youtu.be/dQw4w9WgXcQ?t=149s"
+    )
+    assert main.seek_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1", 90) == (
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s"
+    )
+    for shape in ("shorts", "live", "embed"):
+        assert main.seek_url(f"https://www.youtube.com/{shape}/ABC123", 90) == (
+            "https://www.youtube.com/watch?v=ABC123&t=90s"
+        )
+    assert main.seek_url("https://www.bilibili.com/video/BV1xx411c7mD?p=2", 46) == (
+        "https://www.bilibili.com/video/BV1xx411c7mD?t=46&p=2"
+    )
+    # 抖音与本地文件没有可跳转的网页播放位置
+    assert main.seek_url("https://www.douyin.com/video/7490781203797216550", 10) is None
+    assert main.seek_url("https://b23.tv/abcXYZ", 10) is None
+
+
+def test_write_sprout_report_links_both_ways(monkeypatch, tmp_path) -> None:
+    """发芽报告要和原笔记用 Obsidian 双链互连，且追加那行必须幂等。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    note = tmp_path / "我的笔记.md"
+    note.write_text("# 视频笔记：《我的笔记》\n\n正文\n", encoding="utf-8")
+
+    report_path, stem = main.write_sprout_report("**思想内核**：制度缝隙中的套利", "我的笔记", str(note))
+    assert stem == "我的笔记"
+    assert report_path is not None and report_path.is_file()
+    assert report_path.name == f"我的笔记{main.SPROUT_REPORT_SUFFIX}.md"
+    assert report_path.parent == tmp_path
+
+    report = report_path.read_text(encoding="utf-8")
+    # 报告 → 原笔记：Obsidian 靠这一条链接算出原笔记的反向链接
+    assert "[[我的笔记]]" in report
+    assert "制度缝隙中的套利" in report
+
+    assert main.link_sprout_from_note(str(note), report_path.stem) is True
+    assert f"[[{report_path.stem}]]" in note.read_text(encoding="utf-8")
+    # 再发芽一次不能重复追加
+    main.link_sprout_from_note(str(note), report_path.stem)
+    assert note.read_text(encoding="utf-8").count(f"[[{report_path.stem}]]") == 1
+
+
+def test_write_sprout_report_without_note_path_falls_back(monkeypatch, tmp_path) -> None:
+    """没有归档路径时，报告仍要落在知识库根目录，并用标题当链接目标。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    report_path, stem = main.write_sprout_report("正文", "某个标题", "")
+    assert stem == "某个标题"
+    assert report_path is not None and report_path.parent == tmp_path
+    assert "[[某个标题]]" in report_path.read_text(encoding="utf-8")
+    assert main.link_sprout_from_note("", stem) is False
+
+
+def _seed_aggregate_task(
+    workspace: Path, vault: Path, task_id: str, title: str, body: str, in_vault: bool
+) -> None:
+    """造一个历史任务：正文放任务目录，按需在「知识库」里也放一份同名笔记。"""
+    directory = workspace / task_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "notes.md").write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+    archived = ""
+    if in_vault:
+        (vault / f"{title}.md").write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+        archived = str(vault / f"{title}.md")
+    main.tasks[task_id] = {
+        "status": "completed",
+        "output": "note",
+        "result": {
+            "title": title,
+            "markdown": f"# {title}\n\n{body}\n",
+            "archived_path": archived or "/tmp/somewhere-else/外部笔记.md",
+        },
+    }
+
+
+def test_collect_aggregate_notes_dedupes_and_marks_vault_notes(
+    monkeypatch, tmp_path
+) -> None:
+    """同一篇笔记在多条任务里重复出现只留一次；不在知识库的不给双链目标。"""
+    workspace = tmp_path / "ws"
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", workspace)
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(vault))
+    monkeypatch.setattr(main, "tasks", {})
+
+    _seed_aggregate_task(workspace, vault, "aaa", "闲鱼观察", "第一篇：结果导向", True)
+    _seed_aggregate_task(workspace, vault, "bbb", "闲鱼观察", "同一条视频又跑了一遍", True)
+    _seed_aggregate_task(workspace, vault, "ccc", "决策偏差", "第二篇：系统一与系统二", True)
+    _seed_aggregate_task(workspace, vault, "ddd", "外部笔记", "第三篇：不在知识库", False)
+
+    notes = main.collect_aggregate_notes(["aaa", "bbb", "ccc", "ddd", "不存在的任务"])
+
+    assert [note["task_id"] for note in notes] == ["aaa", "ccc", "ddd"]
+    assert notes[0]["stem"] == "闲鱼观察" and notes[0]["path"]
+    assert notes[-1]["stem"] is None and notes[-1]["path"] == ""
+    assert main.build_aggregate_material(notes).count("【第 ") == 3
+
+
+def test_write_aggregate_report_skips_file_without_card(monkeypatch, tmp_path) -> None:
+    """模型说「没有共同种子」时不给卡片标题，这时不能往知识库里塞文件。"""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(vault))
+    notes = [{"task_id": "aaa", "title": "闲鱼观察", "stem": "闲鱼观察", "path": ""}]
+
+    report_path, seed = main.write_aggregate_sprout_report(
+        "这几篇题材相近但内核不同，没有共同种子。", notes
+    )
+    assert report_path is None and seed == ""
+    assert list(vault.glob("整体发芽*")) == []
+
+
+def test_write_aggregate_report_links_every_note(monkeypatch, tmp_path) -> None:
+    """产出卡片时：卡片连到每篇原笔记，每篇原笔记也补一行回链，且幂等。"""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(vault))
+    first = vault / "闲鱼观察.md"
+    second = vault / "决策偏差.md"
+    first.write_text("# 闲鱼观察\n\n正文\n", encoding="utf-8")
+    second.write_text("# 决策偏差\n\n正文\n", encoding="utf-8")
+    notes = [
+        {"task_id": "aaa", "title": "闲鱼观察", "stem": "闲鱼观察", "path": str(first)},
+        {"task_id": "ccc", "title": "决策偏差", "stem": "决策偏差", "path": str(second)},
+        {"task_id": "ddd", "title": "外部笔记", "stem": None, "path": ""},
+    ]
+    card = (
+        "# 🌱 新知卡片：结果导向同时带来效率与风险\n\n"
+        "**种子：** xxx\n\n**跨界碰撞：**\n- 某领域……\n\n**启发：** yyy"
+    )
+
+    report_path, seed = main.write_aggregate_sprout_report(card, notes)
+
+    assert seed == "结果导向同时带来效率与风险"
+    assert report_path is not None
+    # 文件名按「选中的笔记」定，不按种子概括定——种子每次措辞都不同，
+    # 拿它当文件名会导致同一批笔记反复发芽时文件越堆越多、回链也越加越多
+    assert report_path.name == "整体发芽 · 决策偏差等2篇.md"
+    # 同一批笔记再发芽一次，仍然落在同一份文件上（覆盖而不是新增）
+    again, _ = main.write_aggregate_sprout_report(card, notes)
+    assert again == report_path
+    assert len(list(vault.glob("整体发芽*"))) == 1
+    text = report_path.read_text(encoding="utf-8")
+    assert "[[闲鱼观察]]" in text and "[[决策偏差]]" in text
+    # 不在知识库的那篇只当素材，不能生成死链
+    assert "[[外部笔记]]" not in text
+    for note in (first, second):
+        body = note.read_text(encoding="utf-8")
+        assert f"[[{report_path.stem}]]" in body
+        main.link_sprout_from_note(str(note), report_path.stem, label="整体发芽")
+        assert body.count(f"[[{report_path.stem}]]") == 1
+
+
+
 def test_note_metadata_removes_model_duplicate_block() -> None:
     info = {
         "owner": "作者",
@@ -365,6 +577,113 @@ def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> No
     assert "markdown" not in json.dumps(item)
 
 
+def test_write_think_report_uses_mode_specific_names(monkeypatch, tmp_path) -> None:
+    """发芽 / 拷问 / 自测 产出三份不同文件名的笔记，互不覆盖，标题用模型给的。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    note = tmp_path / "我的笔记.md"
+    note.write_text("# 我的笔记\n\n正文\n", encoding="utf-8")
+    bodies = {
+        "sprout": "# 🌱 新知卡片：结果导向同时带来效率与风险\n\n**种子：** x",
+        "interrogate": "# ⚔️ 拷问：这只是相关性\n\n**Step 4 · 替代方案**\n- ……",
+        "quiz": (
+            "# 🎯 自测：系统一与系统二\n\n**1. 球拍题答案？**\n\n"
+            "<details><summary>答案</summary>\n\n5 元\n\n</details>"
+        ),
+    }
+    names: dict[str, str] = {}
+    for mode, text in bodies.items():
+        path, stem = main.write_think_report(text, "我的笔记", str(note), mode)
+        assert path is not None and path.is_file()
+        assert stem == "我的笔记"
+        names[mode] = path.name
+        body = path.read_text(encoding="utf-8")
+        assert "[[我的笔记]]" in body
+        # 模型给的第一行原样保留，不被兜底标题顶掉
+        assert body.splitlines()[0] == text.splitlines()[0]
+        assert main.THINK_MODES[mode]["footer"] in body
+
+    assert len(set(names.values())) == 3
+    assert names["sprout"] == f"我的笔记{main.SPROUT_REPORT_SUFFIX}.md"
+    assert names["interrogate"].endswith("· 拷问.md")
+    assert names["quiz"].endswith("· 自测.md")
+
+
+def test_write_think_report_falls_back_to_sprout_for_unknown_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """模式名写错时退回发芽，而不是崩掉或写到奇怪的文件名里。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    path, _ = main.write_think_report("正文", "标题", "", "not-a-mode")
+    assert path is not None
+    assert path.name == f"标题{main.SPROUT_REPORT_SUFFIX}.md"
+
+
+def test_link_sprout_from_note_uses_mode_label(monkeypatch, tmp_path) -> None:
+    """回链那行要带模式名，用户一眼能看出这篇笔记被哪个模式处理过。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    note = tmp_path / "笔记.md"
+    note.write_text("正文\n", encoding="utf-8")
+    main.link_sprout_from_note(str(note), "笔记 · 拷问", label="拷问")
+    assert "🌱 拷问：[[笔记 · 拷问]]" in note.read_text(encoding="utf-8")
+
+
+def test_link_sprout_from_note_refuses_paths_outside_vault(monkeypatch, tmp_path) -> None:
+    """知识库外的文件一律不碰：note_path 来自请求体，不校验就是任意文件写。"""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(vault))
+    outside = tmp_path / "外面的文件.md"
+    outside.write_text("原始内容\n", encoding="utf-8")
+
+    assert main.link_sprout_from_note(str(outside), "报告") is False
+    assert outside.read_text(encoding="utf-8") == "原始内容\n"
+
+
+def test_write_think_report_refuses_note_path_outside_vault(monkeypatch, tmp_path) -> None:
+    """库外的 note_path 只当没传：报告落回知识库根目录，而不是那个文件的同级目录。"""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(vault))
+    outside = tmp_path / "外面的文件.md"
+    outside.write_text("原始内容\n", encoding="utf-8")
+
+    path, stem = main.write_think_report("# 🌱 新知卡片：标题\n\n正文", "标题", str(outside))
+    assert path is not None
+    assert path.parent == vault
+    assert stem != outside.stem
+
+
+def test_recent_tasks_support_paging(monkeypatch) -> None:
+    """「加载更多」靠 limit 翻页，同时给出 total——只靠"给满一页"猜不准有没有更多。"""
+    fixture = {}
+    for index in range(25):
+        task_id = f"paged-task-{index:02d}"
+        task = main.new_task(status="completed", task_id=task_id)
+        task.update(
+            created_at=f"2026-08-09T12:{index:02d}:00+00:00",
+            result={"title": f"笔记 {index}", "markdown": "# body"},
+        )
+        fixture[task_id] = task
+    monkeypatch.setattr(main, "tasks", fixture)
+    client = TestClient(main.app)
+
+    first = client.get("/api/tasks").json()
+    assert len(first["tasks"]) == 20
+    assert first["total"] == 25
+
+    more = client.get("/api/tasks?limit=40").json()
+    assert len(more["tasks"]) == 25
+    assert more["total"] == 25
+
+    # 越界 limit 不能一次性把整个历史倒出来；过小的值也不要悄悄放大成一页
+    capped = client.get("/api/tasks?limit=99999").json()
+    assert capped["limit"] == main.TASK_PAGE_MAX
+    assert len(client.get("/api/tasks?limit=5").json()["tasks"]) == 5
+    # 0 / 负数回落到默认一页，而不是返回空
+    assert client.get("/api/tasks?limit=0").json()["limit"] == main.TASK_PAGE_SIZE
+    assert client.get("/api/tasks?limit=-3").json()["limit"] == 1
+
+
 @pytest.mark.parametrize(
     ("host", "allowed"),
     [
@@ -378,6 +697,56 @@ def test_recent_tasks_are_compact_and_do_not_include_markdown(monkeypatch) -> No
 )
 def test_loopback_client_detection(host: str, allowed: bool) -> None:
     assert main.is_loopback_client(host) is allowed
+
+
+@pytest.mark.parametrize(
+    ("header", "allowed"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.1:8000", True),
+        ("localhost", True),
+        ("localhost:8000", True),
+        ("[::1]:8000", True),
+        ("", True),  # HTTP/1.0 与少数本机客户端不带 Host 头
+        ("evil.example.com", False),
+        ("evil.example.com:8000", False),
+        ("127.0.0.1.evil.com", False),
+        ("localhost.evil.com", False),
+        ("127.0.0.1:notaport", False),
+    ],
+)
+def test_host_header_must_be_loopback(header: str, allowed: bool) -> None:
+    """Host 头必须是回环字面量：DNS rebinding 时客户端地址是回环、Host 是攻击者域名。"""
+    assert main.is_loopback_host_header(header) is allowed
+
+
+def test_dns_rebinding_host_is_rejected() -> None:
+    """决定性回归：回环客户端 + 攻击者域名 Host，必须 403（只查客户端地址挡不住）。"""
+    rebound = TestClient(
+        main.app,
+        client=("127.0.0.1", 51234),
+        headers={"Host": "evil.example.com"},
+    )
+    response = rebound.get("/api/tasks")
+    assert response.status_code == 403
+    assert response.json()["detail"] == "VideoToNo 仅允许本机访问"
+
+
+def test_link_sprout_from_note_keeps_backup_and_replaces_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    """原笔记是用户唯一一份：回写必须留 .bak、且不留半截文件。"""
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(tmp_path))
+    note = tmp_path / "笔记.md"
+    note.write_text("原始正文\n", encoding="utf-8")
+
+    assert main.link_sprout_from_note(str(note), "笔记 · 发芽报告") is True
+    assert (tmp_path / "笔记.md.bak").read_text(encoding="utf-8") == "原始正文\n"
+    assert "[[笔记 · 发芽报告]]" in note.read_text(encoding="utf-8")
+    # 幂等：再跑一次不会重复追加，也不会多出临时文件
+    assert main.link_sprout_from_note(str(note), "笔记 · 发芽报告") is True
+    assert note.read_text(encoding="utf-8").count("[[笔记 · 发芽报告]]") == 1
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_llm_stage_error_never_becomes_platform_text() -> None:
@@ -575,6 +944,8 @@ def test_image_route_requires_a_known_task() -> None:
 
 def test_archive_note_deduplicates_names(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    # .env 里若配了 NOTES_OUTPUT_DIR，归档会写到真实的知识库目录——测试必须隔离掉
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", "")
 
     first = main.archive_note("测试 视频", "# 一")
     second = main.archive_note("测试 视频", "# 二")
@@ -589,6 +960,7 @@ def test_archive_note_deduplicates_names(monkeypatch, tmp_path) -> None:
 
 def test_archive_note_ignored_by_task_discovery(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", "")
     main.archive_note("某个视频", "# 笔记")
     main.archive_note("某个视频【转录】", "# 转录", folder=main.TRANSCRIPTS_DIR_NAME)
 
@@ -597,6 +969,64 @@ def test_archive_note_ignored_by_task_discovery(monkeypatch, tmp_path) -> None:
     main.restore_tasks_from_workspace()
     assert main.NOTES_DIR_NAME not in main.tasks
     assert main.TRANSCRIPTS_DIR_NAME not in main.tasks
+
+
+def test_archive_note_honours_notes_output_dir(monkeypatch, tmp_path) -> None:
+    """配上 NOTES_OUTPUT_DIR 后：笔记落根目录，转录稿落其 transcripts/ 子目录。"""
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path / "ws")
+    out = tmp_path / "knowledge"
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(out))
+
+    note = main.archive_note("某个视频", "# 笔记")
+    transcript = main.archive_note(
+        "某个视频【转录】", "# 转录", folder=main.TRANSCRIPTS_DIR_NAME
+    )
+
+    assert note.parent == out
+    assert transcript.parent == out / "transcripts"
+
+
+def test_archive_outside_workspace_copies_frames(monkeypatch, tmp_path) -> None:
+    """归档到项目外时，截图要复制到 <笔记名>.assets/ 并改成指向它的相对引用。
+
+    不这么做的话 ../<task_id>/frames/ 在知识库目录里指向不存在的位置，图全丢。
+    """
+    ws = tmp_path / "ws"
+    task_id = "11111111-2222-3333-4444-555555555555"
+    frames = ws / task_id / main.FRAMES_DIR_NAME
+    frames.mkdir(parents=True)
+    (frames / "frame_0000_0s.jpg").write_bytes(b"jpeg-bytes")
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", ws)
+    out = tmp_path / "knowledge"
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", str(out))
+
+    content = "正文\n\n![截图 1](./frames/frame_0000_0s.jpg)\n"
+    path = main.archive_note("某视频", content, task_id=task_id)
+
+    assets = out / f"{path.stem}.assets"
+    assert (assets / "frame_0000_0s.jpg").read_bytes() == b"jpeg-bytes"
+    written = path.read_text(encoding="utf-8")
+    assert f"./{assets.name}/frame_0000_0s.jpg" in written
+    assert "../" not in written
+
+
+def test_archive_inside_workspace_keeps_sibling_refs(monkeypatch, tmp_path) -> None:
+    """未配置输出目录时沿用原行为：就地引用 ../<task_id>/frames/，不复制文件。"""
+    ws = tmp_path / "ws"
+    task_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    (ws / task_id / main.FRAMES_DIR_NAME).mkdir(parents=True)
+    monkeypatch.setattr(main, "WORKSPACE_DIR", ws)
+    monkeypatch.setattr(main, "NOTES_OUTPUT_DIR", "")
+
+    path = main.archive_note(
+        "某视频", "正文\n\n![截图 1](./frames/frame_0000_0s.jpg)\n", task_id=task_id
+    )
+
+    assert f"../{task_id}/{main.FRAMES_DIR_NAME}/frame_0000_0s.jpg" in path.read_text(
+        encoding="utf-8"
+    )
+    assert not (path.parent / f"{path.stem}.assets").exists()
 
 
 def test_download_returns_markdown_file(
@@ -2361,7 +2791,7 @@ def test_free_cdp_port_survives_winsock_failure(monkeypatch: pytest.MonkeyPatch)
     def boom(*args, **kwargs):
         raise OSError("Winsock 不可用")
 
-    for module in (bili_login, douyin_login):
+    for module in (bili_login,):
         monkeypatch.setattr(module.socket, "socket", boom)
         assert module.free_cdp_port() is None
 
@@ -2374,7 +2804,7 @@ def test_cdp_openers_bypass_system_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
     构建方式则无论 handlers 里有没有 ProxyHandler，代理表都是空的。
     """
     monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": "http://127.0.0.1:9"})
-    for module in (bili_login, douyin_login):
+    for module in (bili_login,):
         opener = module._no_proxy_opener()
         proxy_handlers = [
             handler
@@ -2384,43 +2814,14 @@ def test_cdp_openers_bypass_system_proxy(monkeypatch: pytest.MonkeyPatch) -> Non
         assert all(handler.proxies == {} for handler in proxy_handlers)
 
 
-def test_update_check_endpoint_reports_newer_release(monkeypatch: pytest.MonkeyPatch) -> None:
-    """启动自检的更新端点：新版本在场时给全 tag/地址/节选，交前端弹窗。"""
-    monkeypatch.setattr(
-        main.update_check,
-        "fetch_latest_release",
-        lambda current, timeout=5.0: {
-            "tag_name": "v9.9.9",
-            "html_url": "https://github.com/example/release",
-            "update_available": True,
-            "notes": "修复若干",
-        },
-    )
+def test_update_check_endpoint_is_disabled() -> None:
+    """更新检查已按需移除：端点保留但恒回「无更新」，避免前端旧调用变成 404 噪音。"""
     response = TestClient(main.app).get("/api/update/check")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is True
-    assert body["update_available"] is True
-    assert body["latest_version"] == "v9.9.9"
-    assert body["current_version"] == main.app.version
-    assert body["release_url"] == "https://github.com/example/release"
-    assert body["notes"] == "修复若干"
-
-
-def test_update_check_endpoint_survives_github_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GitHub 连不上时回 200 + ok=False，前端静默，不当成错误打扰用户。"""
-
-    def boom(current, timeout=5.0):
-        raise OSError("网络不通")
-
-    monkeypatch.setattr(main.update_check, "fetch_latest_release", boom)
-    response = TestClient(main.app).get("/api/update/check")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is False
-    assert "OSError" in body["error"]
+    assert body["update_available"] is False
+    assert body["disabled"] is True
 
 
 def test_unhandled_backend_error_comes_back_as_json(

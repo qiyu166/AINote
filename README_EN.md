@@ -2,7 +2,9 @@
   <img src="sources/icon.png" width="96" alt="VideoToNo icon">
 </p>
 
-<h1 align="center">VideoToNo v1.4.5</h1>
+<h1 align="center">AINote</h1>
+
+<p align="center"><em>Forked from <a href="https://github.com/like-attract/video-to-note">like-attract/video-to-note</a> (VideoToNo v1.4.5, MIT) with added sprout / interrogate / quiz modes and Obsidian backlink integration. See <a href="README.md">README.md</a> (Chinese) for details.</em></p>
 
 <p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
 
@@ -206,7 +208,7 @@ The second phrasing sends the client down `transcribe_video` + `get_transcript`,
 For stdio clients such as Codex:
 
 ```bash
-codex mcp add local videotono -- python -m backend.mcp_server
+（MCP 接入已在本二创版本中移除，详见 README.md）
 ```
 
 The MCP server automatically scans ports 8000–8019 to locate a running VideoToNo service. Set `VIDEOTONOTES_BACKEND_URL` to explicitly choose the backend URL.
