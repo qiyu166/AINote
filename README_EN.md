@@ -1,319 +1,224 @@
 <p align="center">
-  <img src="sources/icon.png" width="96" alt="VideoToNo icon">
+  <img src="sources/icon.png" width="96" alt="AINote icon">
 </p>
-
 <h1 align="center">AINote</h1>
 
-<p align="center"><em>Forked from <a href="https://github.com/like-attract/video-to-note">like-attract/video-to-note</a> (VideoToNo v1.4.5, MIT) with added sprout / interrogate / quiz modes and Obsidian backlink integration. See <a href="README.md">README.md</a> (Chinese) for details.</em></p>
-
-<p align="center"><em>Turn videos into Markdown notes you can revisit</em></p>
+<p align="center"><em>Turn videos into notes — then let the notes grow new ideas</em></p>
 
 <p align="center">🌐 <a href="README.md">简体中文</a> · <a href="README_EN.md">English</a></p>
 
-<p align="center"><span style="white-space: nowrap;"><a href="https://github.com/like-attract/video-to-note/actions/workflows/ci.yml"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/actions/workflow/status/like-attract/video-to-note/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>&nbsp;<a href="https://github.com/like-attract/video-to-note/releases/latest"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/v/release/like-attract/video-to-note?display_name=tag&style=flat-square&label=release&color=2563eb" alt="Latest release"></a>&nbsp;<a href="LICENSE"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/license/like-attract/video-to-note?style=flat-square&label=license&color=22c55e" alt="MIT License"></a>&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/frontend-Vanilla%20JS-E34F26?style=flat-square&logo=javascript&logoColor=white" alt="Frontend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="Backend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11"></span></p>
+<p align="center"><a href="LICENSE"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/license/qiyu166/AINote?style=flat-square&label=license&color=22c55e" alt="MIT License"></a>&nbsp;<a href="https://github.com/qiyu166/AINote/actions/workflows/ci.yml"><img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/github/actions/workflow/status/qiyu166/AINote/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/frontend-Vanilla%20JS-E34F26?style=flat-square&logo=javascript&logoColor=white" alt="Frontend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="Backend">&nbsp;<img style="display: inline-block; vertical-align: middle;" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+"></p>
 
-<p align="center"><a href="https://github.com/like-attract/video-to-note/releases/latest"><strong>⬇️ Download the Windows portable build</strong></a></p>
+> A local-first **"video → structured notes → Obsidian vault"** service.
+> Forked from [like-attract/video-to-note](https://github.com/like-attract/video-to-note) (VideoToNo v1.4.5),
+> focused on three **thinking modes** — 🌱 Sprout / ⚔️ Interrogate / 🎯 Quiz — and **Obsidian backlink integration**.
 
-<p align="center">🎬 Promo video (Bilibili): <a href="https://www.bilibili.com/video/BV1Qwby6DEu1/">https://www.bilibili.com/video/BV1Qwby6DEu1/</a> &nbsp;·&nbsp; 👥 QQ group: <code>739200648</code></p>
+Turning a Bilibili / Douyin / local video into a timestamped Markdown note is only the starting point.
+AINote cares about **what happens after the note exists**: let it grow new ideas (Sprout), let it be challenged (Interrogate),
+let it actually stick (Quiz) — and write all of that straight into your Obsidian vault, wired together with backlinks.
 
-VideoToNo turns the **"video → structured notes" pipeline** into a local-first service: give it a Bilibili, Douyin, YouTube link or a local video; it prefers platform captions including Bilibili AI captions, falls back to on-device transcription when none exist (paraformer is the fast default for Chinese, the Whisper family stays available), then has your chosen LLM write timestamped Markdown notes. 
+---
 
-> 🤖 **Agent Skill available**: copy the `skills/video-to-note/` directory from this repo into your agent's skills directory (e.g. `~/.agents/skills/`) and coding agents like Claude Code or pi can generate video notes from a single sentence. See `SKILL.md` inside that directory.
+## 🆚 Differences from upstream VideoToNo
 
-## 🆕 What's New (v1.4.2 → v1.4.5)
+AINote is not a re-skin. Everything below is new or rewritten in this fork:
 
-- **Long videos and small local models finish in one run far more often**: when any single model request was rejected the whole task used to fail and everything already written was lost; now just that stretch is skipped and its original text stays in the note. Local models such as ollama succeed much more often on long videos
-- **Errors say what to change**: the "token limit" hit when a small model runs a long video is now plainly the model's context window being too small, with the way to widen it — you won't be sent to change a setting that does nothing on that channel
-- **Files finally look like files**: txt / html / json / PNG exports are named after the video title, Bilibili parts carry their part number, and "transcript only" is archived separately as `title【转录】.md`; the completion line now points straight at the file you want
-- **A transcription crash no longer takes the whole app down**: transcription runs in its own process, so a faulty model library fails that one task only — the app stays running and you can retry with another model
-- **Network trouble has a self-check now**: the connection test retries without a proxy and says which side failed, and a new self-check panel in the sidebar produces a full report when the page errors
-- **You hear about new versions**: one prompt per release — update, skip this version, or dismiss
+| Feature | Description |
+|---|---|
+| 🌱 **Sprout** | Implements the "Dedao Brain" sprout pattern: **seed → cross-domain collision → insight**. Distils the note's core idea, then hunts for structurally analogous ideas in other fields, producing a "new-knowledge card" |
+| ⚔️ **Interrogate** | Finds holes and **forces alternative solutions**. Names the logical fallacies (survivorship bias, hasty generalisation, correlation-as-causation, …), and **attaches an original-video timestamp to every claim** so the criticism is one click away from the source |
+| 🎯 **Quiz** | Turns the note into questions you can test yourself with. Answers are folded behind `<details>` and **carry a timestamp back to the video** — closing the loop from "watched it → have notes" to "can I answer without looking?" |
+| 🧠 **Aggregate sprout** | Select several past notes and **find the seed that recurs across all of them**, then run the cross-domain collision on that shared seed. A seed that keeps resurfacing across videos is what you actually care about |
+| 🔗 **Obsidian backlinks** | Thinking artefacts are written as their own `.md` files into your vault and **bidirectionally linked** with the source note (`[[note]]` / `[[… · 发芽报告]]`), so they show up immediately in the Backlinks pane. Idempotent — never appended twice |
+| ⏱️ **Clickable timestamps** | `[02:29-02:57]` in a note becomes a link that jumps to that moment in the video. Sharing/tracking parameters are stripped, and timestamps inside code blocks are left alone |
+| 🎙️ **Groq cloud transcription** | New `backend/groq_asr.py`: transcribe with Groq's whisper-large-v3 family — no local model download, and far faster/more accurate than the tiny tier |
+| 🗑️ **Task deletion** | Delete individual or multiple past tasks (completed ones included). **Only the working directory is removed — notes already archived in your vault are untouched** |
+| 📄 **History paging** | A "Load more" button pages through history instead of stopping at the hard-coded 20-item limit |
+| 🛡️ **Local hardening** | ① Host-header validation (DNS-rebinding defence) ② `note_path` confined to the vault directory (arbitrary-file-write defence) ③ atomic note writes + `.bak` backup (so the only copy of a note can't be corrupted) ④ yt-dlp version ceiling |
 
-<details>
-<summary>Previous releases (v1.4.2 and earlier)</summary>
+### Removed relative to upstream
 
-- **v1.4.2**: built-in model IDs moved to each vendor's current names (nothing was removed, saved profiles keep working); "connection test failed", "Bilibili returned nothing" and "the model produced no note body" now say whose problem it is and what to change; a page that won't load gives a short set of steps and shows the local port next to the version; pasting a new link resets the button to "Generate".
+To stay lean, this fork removes the following upstream modules (and cleaned them out of the docs):
 
-- **v1.4.1**: notes with screenshots keep their pictures on export (the Markdown download ships the screenshots, the HTML export carries them, old tasks just need re-exporting); the Whisper dropdown is labeled from on-device benchmarks; manual import for `paraformer-zh` no longer points at an empty folder; a "Let an agent connect (MCP)" section in the sidebar; API keys no longer appear in plain text in model errors, run logs or notifications.
-- **v1.4.0**: hour-plus lectures are now transcribed into a complete chronological note instead of losing the back half (3-hour courses no longer drop roughly 2 hours), with an overview plus a table of contents carrying time ranges; drafting is an order of magnitude faster (a 3-hour course in about 10 minutes); note formulas render in the preview and in exported Markdown; two faster Chinese engines (paraformer-zh, belle-turbo-zh) plus CPU decode tuning; transcription reports progress every 30 seconds; Bilibili multi-part selection before submitting, remembered per video; model profiles renameable from the dropdown; failure messages now name the platform and stage that actually need checking.
-- **v1.3.5**: new "Transcript only" output (no LLM, no key; transcripts can switch to the note route later); the transcript exit opened to MCP / Skill (`transcribe_video` + `get_transcript`); transcripts of failed tasks remain fetchable; local videos work on first upload (no fail-then-retry) with the 2 GB limit truly in place; GPU falls back to CPU when CUDA runtime libraries are missing; pending tasks can be deleted.
-- **v1.3.0**: API keys and Bilibili credentials can be **saved to this machine per endpoint address** (DPAPI-encrypted on Windows, reused only when the target address matches, with a key-state chip beside the input); model profiles each remember their own model and custom endpoints become named profiles with autosave; cancellation now reaches *Cancelled* instantly in every stage (measured 18.6s → 0.02s); fixed model IDs bleeding across profiles and early failures leaving tasks in `processing`; MCP gained `list_llm_keys`, `save_llm_config` labels, and `endpoints` / `key_storage` in `get_saved_config`.
-- **v1.2.3**: Bilibili notes survive risk control (automatic fallback to `api.bilibili.com` open endpoints for metadata, audio and preview streams across multi-part videos, Issue #1), three guardrails against the "Faithful" style hanging in generation, generation progress heartbeat, reasoning effort adapting to the note style, and automatic degradation when a channel rejects a thinking parameter
-- **v1.2.2**: Agent Skill integration (`skills/video-to-note/`, one-sentence note generation), Windows tray notifications for task results, rewritten repo and docs positioning
-- **v1.2.1**: immediate cancellation across all stages (LLM streaming/download hooks/model download per-chunk), upload limit 2 GB + auto audio extraction for large videos, Whisper base model bundle
-- **v1.2.0**: Bilibili multi-part support, per-segment Whisper cancellation, false-positive SESSDATA fix, manual Whisper model import UI
-- **v1.1.8**: run-mode & app-version service isolation, recent-task scrollbar, faithful-note metadata de-duplication, custom Base URL diagnostics
-- **v1.1.7**: single public Douyin links, browser-verification fallback, transcript reuse, and cancelled-task deletion.
-- **v1.1.6**: persistent Whisper download confirmation and packaged custom-workspace fixes.
-- **v1.1.5**: stale-page, MCP SSE, and startup-warning fixes.
-- **v1.1.4**: note metadata, tray update checks, more reliable Bilibili downloads, and Whisper fallback improvements.
-- **v1.1.3 and earlier**: Bilibili 412 handling, LLM connection testing, MCP integration, long-video chunking, task recovery, and multi-format exports.
+- `backend/mcp_server.py` — MCP integration
+- `backend/update_check.py` — update checking
+- `backend/douyin_login.py` — Douyin login (Douyin scraping was retired due to platform risk control)
+- System-tray residency
 
-</details>
+---
 
 ## 🖼️ Screenshots
 
-### ⚙️ Configuration
+![Interface](sources/preview.png)
 
-<p align="center"><img src="sources/preview.png" alt="VideoToNo configuration and video submission interface" width="100%"></p>
+---
 
-### ⏳ Processing
+## 🚀 Install and run
 
-<p align="center"><img src="sources/process.png" alt="VideoToNo task progress and runtime log" width="100%"></p>
+### Requirements
 
-### 📝 Generated note
+- Python **3.10+**（developed and verified on 3.12）
+- No manual FFmpeg install needed: audio/video decoding goes through PyAV, model downloads through HuggingFace
 
-<p align="center"><img src="sources/output-public.png" alt="Detailed video notes generated by VideoToNo" width="100%"></p>
+### Quick start
 
-## 🚀 Portable build (recommended)
+```bash
+git clone https://github.com/qiyu166/AINote.git
+cd AINote
 
-No Python or development setup is required. Download `VideoToNo-1.4.5-portable.exe` from the [latest Release](https://github.com/like-attract/video-to-note/releases/latest):
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-1. Download and double-click the exe;
-2. Wait for the local page to open in your browser;
-3. Paste a video URL or upload a local file — for a finished note, enter a provider, model, and API key first; **for a timestamped transcript only, choose "Transcript only" and enter nothing**;
-4. Generate and review the note or the transcript.
+pip install -r backend/requirements.txt
 
-The portable build starts the local service and stays in the system tray. The first Whisper transcription downloads a model, so keep the network available. Tasks, transcripts, screenshots, and notes are stored under `workspace/` next to the exe by default.
+cp .env.example .env             # optional: configure the archive directory
+python launcher.py
+```
 
-## ✨ Highlights
+The browser opens automatically at `http://127.0.0.1:8000`.
 
-- 🎥 **Flexible inputs**: Bilibili, Douyin, YouTube, other URLs supported by the installed `yt-dlp`, and local audio/video files.
-- 🇨🇳 **Bilibili integration**: fetches Bilibili AI captions after sign-in, with QR-code credential import in the UI; falls back to the open API when the video page is risk-controlled.
-- 🎵 **Douyin single-link integration**: handles public share links directly and can retry after manual verification in an isolated local browser.
-- 🧾 **Real timestamps**: keeps segment start and end times from captions or Whisper instead of asking the model to invent them.
-- 🧠 **Long-transcript handling**: chunks, summarizes, and reduces long material while keeping context pressure under control.
-- 🖼️ **Multiple exports**: Markdown, HTML, JSON, plain text, and PNG, with optional video screenshots as note attachments.
-- 🤖 **Raw material for agents**: a connected agent can stop at the timestamped transcript — no LLM call and no API key for this machine, and it writes the notes in its own structure and style.
-- 🛡️ **Local-first**: media downloads, transcription, and file generation happen locally; the service listens on `127.0.0.1` by default.
+---
+
+## ⚙️ Configuration
+
+Edit `.env` in the project root (already excluded by `.gitignore`, so it is never committed):
+
+| Variable | Description | Default |
+|---|---|---|
+| `HOST` | Bind address — **keep this at 127.0.0.1** | `127.0.0.1` |
+| `PORT` | Port | `8000` |
+| `MAX_UPLOAD_MB` | Local upload size cap | `2048` |
+| `MAX_CONCURRENT_TASKS` | Concurrent tasks | `1` |
+| `TASK_HISTORY_LIMIT` | Retained history entries | `100` |
+| `NOTES_OUTPUT_DIR` | **Archive directory** (point it at your Obsidian vault) | empty (`workspace/notes/`) |
+| `VIDEOTONOTES_WORKSPACE` | Working directory | `workspace/` inside the project |
+
+### Wiring it into Obsidian (recommended)
+
+```env
+NOTES_OUTPUT_DIR=/Users/you/Documents/ObsidianVault
+```
+
+Once set:
+
+1. Notes are archived into that directory, screenshots are copied to `<note>.assets/` and rewritten as relative references — so **the vault is self-contained** and survives deleting the working directory or moving machines
+2. Clicking "🌱 Thinking" writes the Sprout / Interrogate / Quiz artefact **directly into the vault**, cross-linked with the source note
+3. Open the source note → **Backlinks** pane → the thinking artefact is listed there
+
+### Configuring models
+
+Enter your API key under **Model configuration** in the left sidebar. DeepSeek, OpenAI, Groq, Qwen, Zhipu, Moonshot and any OpenAI-compatible gateway are supported.
+
+- "Save to this machine" stores the key on the backend, **keyed by endpoint address** (so a key can never be sent to a different gateway by mistake)
+- Groq transcription needs its own Groq key
+
+> **Honest note on key storage**: on Windows keys are encrypted with DPAPI; **on macOS / Linux they fall back to plaintext**, protected only by file permissions (`0600`).
+> The `/api/health` endpoint reports `llm_key_storage` truthfully so you can always tell which mode you are in.
+
+---
 
 ## 🔁 Processing pipeline
 
-```text
-Video URL / local file
-        ↓
-Platform captions (Bilibili AI captions first)
-        ↓ when unavailable
-Local faster-whisper transcription
-        ↓
-Timestamped transcript ──────→ handed to an agent to write its own notes (no LLM, no API key)
-        ↓
-LLM-generated timestamped Markdown note
 ```
+Video link / local file
+      ↓
+Fetch metadata → platform captions / on-device transcription (Whisper, Paraformer, or Groq cloud)
+      ↓
+Timeline alignment → screenshot extraction (optional)
+      ↓
+LLM writes the structured note
+      ↓
+Timestamps → clickable links → archived to the vault
+      ↓
+        ┌───────────────┴───────────────┐
+        ↓                               ↓
+   🌱 Three thinking modes           Manual review
+   (Sprout / Interrogate / Quiz)
+        ↓
+  Written into Obsidian + backlinks
+```
+
+---
 
 ## 🌍 Supported inputs
 
-- Bilibili, Douyin, YouTube, and other `http` / `https` video URLs that the installed `yt-dlp` can parse;
-- single public Douyin share links, with an isolated local browser available for sign-in or verification when anonymous parsing is restricted;
-- local `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.mp4`, `.mkv`, `.mov`, `.webm`, and `.avi` files;
-- iQiyi and Tencent Video are not specially adapted, so support depends on access permissions, caption availability, and `yt-dlp` behavior.
+| Source | Platform captions | On-device transcription | Screenshots |
+|---|---|---|---|
+| Bilibili (multi-part included) | ✅ | ✅ | ✅ |
+| Local video / audio | — | ✅ | ✅ |
+| YouTube and other yt-dlp sites | Site-dependent | ✅ | ✅ |
+| Douyin | ❌ retired (needs a browser context; risk control outweighs the benefit) | ✅ save locally and upload instead | ✅ |
 
-## ⚙️ Use and configure
+---
 
-After starting the app:
+## ❓ FAQ
 
-1. Choose the output type: **Note** (needs an API key) or **Transcript only** (a timestamped transcript and nothing else — no LLM is called, **no API key needed**, and the note-style and screenshot settings collapse);
-2. For notes, pick a model profile and enter an API key: DeepSeek / OpenAI / GLM / Qwen / Kimi each remember their own model, and custom OpenAI-compatible endpoints can be saved as several named profiles — switching profiles never overwrites another one's settings;
-3. Choose a note style, reasoning effort, and Whisper model;
-4. Paste a video URL or upload a local file;
-5. Preview, copy, or download the result. A transcript stays in *Recent tasks* (tagged *Transcript*) for later review and download, and "Write notes from this transcript" switches it to the note route without re-running the transcription.
+**Why does it need a Bilibili cookie?**
+Bilibili applies risk control to some endpoints (the video page can return 412). Signing in via QR code markedly improves metadata and caption success rates. Cookies are obtained through a dedicated browser instance (CDP) and stored with the same envelope encryption.
 
-Profiles, recognition settings and the theme are non-sensitive and are remembered automatically in your local browser. An API key stays in the current page only, and is lost on refresh until you press **Save to this machine**; that writes it to `workspace/llm_keys.json`, encrypted with Windows' built-in DPAPI (a copy of the file on another machine or Windows account cannot be decrypted) — other platforms store it in plaintext and the interface says so. **A saved key is bound to its endpoint address**: it is only reused when the target address matches, never sent to another gateway. QR-login Bilibili cookies still live only in the local process unless you explicitly save them; do not share those workspace files.
+**Will the thinking artefacts overwrite my notes?**
+No. Sprout / Interrogate / Quiz are **separate files** (`<note> · 发芽报告.md`, etc.). The source note only gets **one extra backlink line appended**, and that write is backed up to `.bak` and performed via "temp file + atomic replace", so it cannot be corrupted.
 
-<details>
-<summary>🧑‍💻 Source use and building (developers)</summary>
+**Does re-sprouting pile up files?**
+No. Re-running Sprout on the same note **overwrites the same report**; aggregate sprout names the file from the selected notes, so it does not multiply when the model words the seed differently.
 
-If you want the source, use `git clone` or GitHub **Code → Download ZIP**. The project targets Windows + Python 3.11; install `backend/requirements.txt` and use `start.ps1` to run it:
+**Does deleting a task delete the note in Obsidian?**
+No. Deletion only clears the working directory (audio, transcript, screenshots). The vault copy is untouched.
 
-```powershell
-git clone https://github.com/like-attract/video-to-note.git
-cd video-to-note
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-.\start.ps1
-```
+**What happens when there are no captions?**
+It falls back to on-device transcription (or whatever cloud transcription you selected).
 
-Build a Windows portable executable with:
+**Why is the first transcription so slow?**
+The first Whisper run downloads a model (roughly 500 MB for small, 3 GB for large-v3). Choosing Groq cloud transcription skips this entirely.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
-```
+**The model returns a 400 `unsupported_parameter`?**
+Some gateways reject the `thinking` / `reasoning_effort` parameters. The app degrades and retries automatically; if it persists, turn off deep thinking on the model configuration page.
 
-</details>
+---
 
-<details>
-<summary>🤖 MCP / AI clients (advanced)</summary>
-
-VideoToNo includes an MCP (Model Context Protocol) server, so AI clients such as Cherry Studio and Codex can turn a video link into a timestamped transcript or a note directly. **Start VideoToNo first**: MCP tasks run through the local backend and reuse its Whisper model cache and task directories.
-
-Pick a route: if your client already has a capable model, use `transcribe_video` + `get_transcript` to take the timestamped transcript only — **no API key for this machine**, and the client decides the note structure and style. Reach for `summarize_video` when a finished note is wanted in one shot (or for a long video best processed in the background).
-
-The recommended pattern is **get the transcript first, let the client do the organising**: this service only supplies the text, so reading order, judgement, and the final structure are up to the model on your side and your follow-up instructions can stay loose:
-
-```text
-Transcribe this video into timestamped text first: https://www.bilibili.com/video/BV1xx
-Then organise it as you see fit: go deep on the XXX part, merge what repeats,
-fill in the skipped derivations, add background where the video was thin,
-and give me something readable at the end.
-```
-
-Re-structuring, digging into a single section, or asking follow-up questions while it writes all work, and none of it needs a key on this machine or applies a fixed note template. Use `summarize_video` when you want a ready-made standard note instead (it needs a key and follows the selected style).
-
-Available tools:
-
-| Tool | Description |
-|---|---|
-| `summarize_video` | Submit a video summarization task; URL, API key, model, and Bilibili credentials can be omitted when saved local config is available for that endpoint |
-| `transcribe_video` | Stop at the timestamped transcript: no LLM call anywhere in this route, so no API key is needed |
-| `get_transcript` | Fetch a task's transcript (full markdown or JSON segments); works for historical tasks whose note generation later failed |
-| `wait_for_task` | Wait for a terminal task state for up to 45 seconds per call — use it instead of aggressive polling. Note tasks return the finished note; transcript-only tasks return status plus a pointer to `get_transcript` |
-| `get_task_status` | Inspect intermediate task progress |
-| `list_whisper_models` | Show local Whisper model cache status |
-| `save_llm_config` | Save the provider, model, and API key for one endpoint address locally (encrypted on Windows, plaintext with a visible note elsewhere) so calls to that address need no key |
-| `save_bilibili_credentials` | Save Bilibili credentials such as SESSDATA for automatic use with Bilibili videos, sealed with the same local encryption as API keys (encrypted on Windows, plaintext with a visible note elsewhere) |
-| `list_llm_keys` | List the endpoint addresses whose keys are saved locally (masked values and storage algorithm only) |
-| `get_saved_config` | View saved configuration status with secrets masked |
-
-### Cherry Studio (recommended; no local Python needed)
-
-1. Start VideoToNo, then open Cherry Studio **Settings → MCP Servers → Add**;
-2. Choose **Server-Sent Events (SSE)** and enter:
-
-```text
-http://127.0.0.1:8000/mcp/sse
-```
-
-Use the actual port if it is not 8000. Save and enable the server, then ask the AI client to use VideoToNo.
-
-For first-time use, ask the AI to save your configuration once. You will not need to repeat sensitive information in later conversations:
-
-```text
-Please call save_llm_config to save my configuration: my DeepSeek API key is sk-xxx.
-Then call save_bilibili_credentials to save: sessdata=xxx, bili_jct=xxx, buvid3=xxx.
-```
-
-Afterward, simply ask for what you need:
-
-```text
-Summarize this Bilibili video: https://www.bilibili.com/video/BV1xx
-```
-
-```text
-Just give me a timestamped transcript of this video, I'll write my own notes: https://www.bilibili.com/video/BV1xx
-```
-
-The second phrasing sends the client down `transcribe_video` + `get_transcript`, which needs no API key saved on this machine.
-
-### Codex CLI
-
-For stdio clients such as Codex:
+## 🧪 Development
 
 ```bash
-（MCP 接入已在本二创版本中移除，详见 README.md）
+pip install -r backend/requirements-dev.txt
+python -m pytest tests/ -q
 ```
 
-The MCP server automatically scans ports 8000–8019 to locate a running VideoToNo service. Set `VIDEOTONOTES_BACKEND_URL` to explicitly choose the backend URL.
+Current suite: **358 passed / 2 skipped**.
 
-> Privacy: `save_llm_config` (and the web page's **Save to this machine**) writes API keys to `workspace/llm_keys.json`, encrypted per Windows user with the system DPAPI — copying that file to another machine or another Windows account makes it undecryptable and you must re-enter the key. Non-Windows platforms have no DPAPI, so keys are stored in plaintext and the interface says so. A stored key is bound to the endpoint address it was saved for and is only reused when that address matches. `save_bilibili_credentials` seals SESSDATA and bili_jct with the same envelope into `workspace/bili_credentials.json` (also bound to the current Windows account, so re-save it after moving machines; `buvid3` is a device identifier the client already sends in the clear, so it stays plaintext). Nothing is persisted unless you explicitly call a save tool; `workspace/` is excluded by `.gitignore` and is not committed to this repository — do not share those files.
+### Project layout
 
-</details>
-
-<details>
-<summary>🧩 Agent Skill (advanced)</summary>
-
-Besides MCP, VideoToNo also ships an **Agent Skill** (`skills/video-to-note/`) for skill-capable coding agents such as Claude Code and pi: the agent reads `SKILL.md`, then drives the bundled script through the full flow — submit a task, stream progress, and fetch the finished note. **Start VideoToNo first**; like MCP, tasks run through the local backend.
-
-### Install
-
-Copy the whole `skills/video-to-note/` directory from this repo into your agent's skills directory, for example:
-
-```text
-C:\Users\<you>\.agents\skills\video-to-note\        # pi / common convention
-~/.claude/skills/video-to-note/                       # Claude Code
+```
+backend/
+  main.py            FastAPI app: routes, task pipeline, archiving, security middleware
+  llm_summarizer.py  LLM calls and per-mode prompts (sprout / interrogate / quiz / aggregate)
+  groq_asr.py        Groq cloud transcription (new in this fork)
+  whisper_asr.py     local faster-whisper
+  paraformer_asr.py  sherpa-onnx Chinese transcription
+  video_processor.py yt-dlp download, captions, screenshots
+  config_store.py    local configuration and key storage
+  secret_box.py      key encryption at rest (DPAPI / plaintext fallback)
+frontend/            vanilla-JS single-page UI
+tests/               pytest suite
 ```
 
-### Usage
-
-After installing, just ask in one sentence:
-
-```text
-Turn this Bilibili video into notes: https://www.bilibili.com/video/BV1xx
-```
-
-```text
-Transcribe this video with timestamps, then organise it as you see fit:
-go deep on XXX, merge what repeats, add background the video skipped,
-and save the result as notes.md: https://www.bilibili.com/video/BV1xx
-```
-
-The agent invokes the bundled `scripts/video_note.py`, which auto-detects the service port, submits the task, streams runtime logs, and prints (or saves) the result. The second phrasing takes the `--transcript-only` route: no API key on this machine, and everything after the transcript — judgement, additions, structure — is the agent's call, so the instruction does not need to be precise. Common options: `--transcript-only` (timestamped transcript only, no LLM call), `--style detailed|faithful|concise`, `--wait seconds`, `--out file`; a local video file path works as input too.
-
-> **When the agent has its own model, prefer `--transcript-only`**: that route never calls an LLM, so it needs no API key and the agent keeps full control over note structure and style. Only the finished-note route needs an LLM API key: the agent will ask for it — pass it via `--provider` / `--api-key`. If this machine has a saved key for exactly one endpoint address (web page **Save to this machine** or the MCP `save_llm_config` tool), omit them and that channel is reused.
-
-</details>
-
-<details>
-<summary>❓ FAQ</summary>
-
-### Why does the first transcription take so long?
-
-`faster-whisper` downloads a model the first time that model is used. Download time depends on model size and network conditions. The local cache is reused later, but choosing another model can trigger another download.
-
-Models are cached under `workspace/_model_cache/` by default. Set `WHISPER_CACHE_DIR` in `.env` to use another disk. Downloads use the **hf-mirror.com mirror** by default with resume and retry support; set `HF_ENDPOINT` to switch sources, for example `HF_ENDPOINT=https://huggingface.co` for the official host. If downloads still fail, check network connectivity, proxy settings, and write access to the cache directory.
-
-The app disables Hugging Face's Xet download backend by default and uses regular HTTP downloads to avoid CAS reconstruction failures on some Windows networks. If the selected model is incomplete but a usable `base` model is already cached, the job falls back to `base` and records that decision in the task log rather than waiting indefinitely for a weight download.
-
-### What if large models (medium and above) keep failing to download?
-
-Large models are big (medium ≈ 1.5 GB) and prone to interruptions on unstable networks. Besides retrying (resume supported), you can import a model manually:
-
-1. Pick the model under the transcription settings and click "**手动导入模型**" (Import model manually). A dialog lists exactly which files that model needs and where to download them; confirm and the app opens the import folder (`workspace/_model_cache/manual/<model>/`);
-2. Save those files in a browser: `config.json`, `model.bin`, `tokenizer.json`, plus the vocabulary file — `vocabulary.txt` or `vocabulary.json` depending on the repository (`large-v3` only ships `.json`). Use whichever one the download page offers;
-3. Drop the files into that folder unchanged. The app detects them within seconds and marks the model as cached.
-
-Downloads and cached files are verified for integrity; corrupt leftovers from interrupted downloads are cleaned up and re-downloaded automatically.
-
-### Why is CPU transcription slower than the video duration?
-
-Speed depends on CPU performance, media duration, and model size. CPU mode uses `int8` to reduce resource pressure, but `medium`, `large-v3`, and `turbo` can still be slow and memory-intensive. Start with `base` on a personal computer, and enable GPU mode only after confirming CUDA works correctly.
-
-### Why would I need a Bilibili cookie?
-
-Publicly accessible videos normally do not need one. Some visible Chinese AI captions are returned only by signed-in caption endpoints; without credentials, the app records the reason and falls back to Whisper. Signed-in, restricted, or caption-limited videos may need credentials for an account that already has access. A cookie cannot grant permissions the account does not have, can expire, and may stop working when the platform changes its rules.
-
-### What happens to tasks after restarting the service?
-
-VideoToNo restores recent tasks from `workspace/<task-id>/task.json`. Completed tasks remain available for preview and download, and uploaded tasks that have not started can be submitted again. A task that was running during restart is marked failed because external downloads, Whisper, and LLM requests cannot continue across processes; already generated captions, transcripts, and audio can still be reused on a later submission.
-
-### Why can a particular URL not be processed?
-
-First confirm that it plays in the current network and account, then update the project's `yt-dlp` dependency. Paid content, DRM, CAPTCHAs, region restrictions, expired signatures, and platform API changes can all prevent extraction. This project does not bypass platform access controls.
-
-### What happens when no captions are available?
-
-The app downloads the best available audio stream and runs `faster-whisper` locally. This takes longer than using captions and is affected by audio quality, accents, background noise, and domain-specific vocabulary.
-
-### Why does the log say that the model returned no body and reasoning was disabled for a retry?
-
-That message means the model actually returned an empty body; it is not merely a display issue. The app reports it immediately at the current generation stage and retries once with reasoning disabled. If the retry is also empty, the task follows its actual error path.
-
-### What about a 400 `unsupported_parameter` for `thinking` / `reasoning_effort`?
-
-OpenAI-compatible channels differ a lot in how thinking is controlled: many only accept the standard `reasoning_effort` and reject the vendor-specific `thinking` field with a 400. VideoToNo now **sends standard parameters by default** (the private `thinking` field is only used to disable thinking on the official DeepSeek API) and degrades automatically when a channel rejects a parameter: `reasoning_effort` → nested `reasoning.effort` → no parameter at all (model default), logging "this channel does not support the X parameter". The same applies to the output budget: if the `max_tokens` we raise for the thinking chain exceeds your gateway's cap, it falls back to the note length and finally omits the parameter. To skip the first doomed request, declare the capability up front via an environment variable (comma-separated; `thinking`, `reasoning_effort`, `reasoning`, `enable_thinking`):
-
-```powershell
-$env:VIDEOTONOTES_REJECTED_LLM_PARAMS = "thinking,reasoning_effort"
-```
-
-### Why does the task keep going when the Bilibili video page is unreachable?
-
-In some networks the Bilibili video page is risk-controlled (`HTTP 412`) while the `api.bilibili.com` open endpoints still work. VideoToNo automatically falls back to those endpoints for metadata, audio and preview streams (multi-part videos included) and writes "fell back to the open API" into the run log, so you do not need to resubmit. Nothing here bypasses platform permissions: sign-in-only and VIP content still needs valid credentials.
-
-### Why does progress sit on "deep thinking" for a while?
-
-Detailed and Faithful notes default to a higher thinking level, so long videos can spend several minutes producing reasoning only. The UI refreshes "deep thinking (N characters so far)" or "model produced N characters" every 20 seconds, which means the task is still moving. Pick a lower level explicitly under Reasoning effort if you prefer speed or cost. Tasks can be cancelled at any time and transcripts are kept.
-
-</details>
+---
 
 ## 📄 License
 
-This is a local personal-use tool released under the [MIT License](LICENSE).
+This project is a derivative work based on **[like-attract/video-to-note](https://github.com/like-attract/video-to-note)**
+(VideoToNo v1.4.5) and is distributed under the original **MIT License**.
+
+```
+Copyright (c) 2026 like-attract (original VideoToNo author, upstream project video-to-note)
+Copyright (c) 2026 qiyu166 (AINote derivative work)
+```
+
+The MIT licence permits use, modification, distribution and commercial use, **provided the copyright and licence notices above are retained**.
+See [LICENSE](LICENSE) for the full text.
+
+### Acknowledgements
+
+- Upstream: [like-attract/video-to-note](https://github.com/like-attract/video-to-note) — the solid local-first architecture, transcription pipeline and note generation all come from there
+- The sprout / interrogate / critique / create / review methodology is inspired by **Dedao Brain (得到大脑)** and the "Dedao-style thinking skills" pack on ClawHub (MIT-0)
+
+> AINote is not affiliated with any of the projects above; it is an independent derivative. Please file issues at [this repository](https://github.com/qiyu166/AINote/issues).

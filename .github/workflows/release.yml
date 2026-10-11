@@ -83,7 +83,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/VideoToNo-${{ env.VERSION }}-portable.exe
+          path: dist/AINote-${{ env.VERSION }}-portable.exe
           if-no-files-found: error
 
   publish:
@@ -109,7 +109,7 @@ jobs:
         run: |
           # heredoc 不带引号：正文里的 $ 必须写成 \$，否则 $$ 会被展开成 shell 进程号（v1.4.0 实测踩到）
           NOTES=$(cat <<EOF
-          ## VideoToNo $GITHUB_REF_NAME
+          ## AINote $GITHUB_REF_NAME
 
           ### v1.4.5 更新
 
@@ -123,4 +123,4 @@ jobs:
 
           EOF
           )
-          gh release create "$GITHUB_REF_NAME" release-assets/* --notes "$NOTES" --title "VideoToNo $GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" release-assets/* --notes "$NOTES" --title "AINote $GITHUB_REF_NAME"

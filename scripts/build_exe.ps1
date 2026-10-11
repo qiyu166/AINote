@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Python = "",
     [switch]$SkipInstall
 )
@@ -92,7 +92,7 @@ foreach ($dllName in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
 # 中间任何一步想数元素个数都会数错。
 $pyiArgs = @(
     "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
-    "--name", "VideoToNo",
+    "--name", "AINote",
     "--add-data", "frontend;frontend",
     "--add-data", "sources/icon.png;sources",
     "--add-data", "sources/icon.ico;sources"
@@ -101,8 +101,6 @@ $pyiArgs += $vcAdd
 $pyiArgs += @(
     "--collect-data", "faster_whisper",
     "--collect-all", "sherpa_onnx",
-    "--collect-submodules", "mcp.server",
-    "--collect-data", "mcp",
     "--version-file", "scripts\version_info.txt",
     "--icon", "sources\icon.ico",
     "--hidden-import", "pystray._win32",
@@ -112,12 +110,12 @@ $pyiArgs += @(
 & $Python @pyiArgs
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败" }
 
-$target = Join-Path $projectRoot "dist\VideoToNo-$version-portable.exe"
-Copy-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Destination $target -Force
+$target = Join-Path $projectRoot "dist\AINote-$version-portable.exe"
+Copy-Item -LiteralPath (Join-Path $projectRoot "dist\AINote.exe") -Destination $target -Force
 # 固定名副本：桌面快捷方式指向它，升级后无需改快捷方式目标
-$latest = Join-Path $projectRoot "dist\VideoToNo-portable.exe"
-Copy-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Destination $latest -Force
-Remove-Item -LiteralPath (Join-Path $projectRoot "dist\VideoToNo.exe") -Force
+$latest = Join-Path $projectRoot "dist\AINote-portable.exe"
+Copy-Item -LiteralPath (Join-Path $projectRoot "dist\AINote.exe") -Destination $latest -Force
+Remove-Item -LiteralPath (Join-Path $projectRoot "dist\AINote.exe") -Force
 
 # 收尾再量一次产物里的 VC++ 运行时版本，作为上面取源的兜底：包内 DLL 在搜索顺序上盖过用户
 # 自己的 System32，一份 2016 年的 base 会让每个用户的转写都崩 0xC0000005（2026-10 群测，
