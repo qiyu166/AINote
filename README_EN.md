@@ -32,6 +32,7 @@ AINote is not a re-skin. Everything below is new or rewritten in this fork:
 | 🔗 **Obsidian backlinks** | Thinking artefacts are written as their own `.md` files into your vault and **bidirectionally linked** with the source note (`[[note]]` / `[[… · 发芽报告]]`), so they show up immediately in the Backlinks pane. Idempotent — never appended twice |
 | ⏱️ **Clickable timestamps** | `[02:29-02:57]` in a note becomes a link that jumps to that moment in the video. Sharing/tracking parameters are stripped, and timestamps inside code blocks are left alone |
 | 🎙️ **Groq cloud transcription** | New `backend/groq_asr.py`: transcribe with Groq's whisper-large-v3 family — no local model download, and far faster/more accurate than the tiny tier |
+| 🎬 **Douyin link parsing** | Upstream retired Douyin; this fork revives it with a "headless browser opens the post page → waits for the risk-control cookie → reads the detail endpoint in-page" channel. **Public posts need no login**; login-only posts can be imported by QR scan under "Douyin credentials" (cookies encrypted on this machine) |
 | 🗑️ **Task deletion** | Delete individual or multiple past tasks (completed ones included). **Only the working directory is removed — notes already archived in your vault are untouched** |
 | 📄 **History paging** | A "Load more" button pages through history instead of stopping at the hard-coded 20-item limit |
 | 🛡️ **Local hardening** | ① Host-header validation (DNS-rebinding defence) ② `note_path` confined to the vault directory (arbitrary-file-write defence) ③ atomic note writes + `.bak` backup (so the only copy of a note can't be corrupted) ④ yt-dlp version ceiling |
@@ -42,7 +43,6 @@ To stay lean, this fork removes the following upstream modules (and cleaned them
 
 - `backend/mcp_server.py` — MCP integration
 - `backend/update_check.py` — update checking
-- `backend/douyin_login.py` — Douyin login (Douyin scraping was retired due to platform risk control)
 - System-tray residency
 
 ---
@@ -147,7 +147,7 @@ Timestamps → clickable links → archived to the vault
 | Bilibili (multi-part included) | ✅ | ✅ | ✅ |
 | Local video / audio | — | ✅ | ✅ |
 | YouTube and other yt-dlp sites | Site-dependent | ✅ | ✅ |
-| Douyin | ❌ retired (needs a browser context; risk control outweighs the benefit) | ✅ save locally and upload instead | ✅ |
+| Douyin | — no platform captions | ✅ resolved via headless browser, then transcribed locally | ✅ |
 
 ---
 
