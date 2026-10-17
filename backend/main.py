@@ -2749,7 +2749,27 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             cleaned = redact_secrets(warning, api_key)
             if cleaned not in task["logs"]:
                 task["logs"].append(cleaned)
-        summary = add_note_header_metadata(summary, title, info)
+        # 笔记标题不再沿用原视频标题：让模型从成稿正文里拟一个短标题，再拼上风格标签
+        # （如「大模型记忆机制（详细）」）。失败一律降级回视频标题，绝不因此让任务失败。
+        note_title = composite_note_title(title, request.summary_style) or title
+        try:
+            short_title = await summarizer.generate_note_title(
+                summary, request.summary_style, should_abort=should_abort
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            short_title = ""
+            task["logs"].append(
+                f"短标题生成失败，沿用视频标题（{type(exc).__name__}）"
+            )
+        composed = composite_note_title(short_title, request.summary_style)
+        if composed:
+            note_title = composed
+            task["logs"].append(f"笔记标题：{note_title}")
+        elif not short_title:
+            task["logs"].append("未能拟出短标题，沿用视频标题")
+        summary = add_note_header_metadata(summary, note_title, info)
         if screenshots:
             summary += "\n\n## 视频截图\n\n" + "\n\n".join(
                 f"![截图 {index}](./{FRAMES_DIR_NAME}/{path.name})"
@@ -2776,12 +2796,12 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
 
         task_dir = WORKSPACE_DIR / task_id
         write_text_atomically(task_dir / "notes.md", summary)
-        archived_path = archive_note(download_stem(title, info), summary, task_id)
+        archived_path = archive_note(download_stem(note_title, info), summary, task_id)
         if archived_path:
             task["logs"].append(f"笔记已归档：{archived_path}")
         elapsed = finish_task_timing(task)
         task["result"] = {
-            "title": title,
+            "title": note_title,
             "markdown": summary,
             "source": VideoSource.LOCAL.value if is_local else info.get("source", "other"),
             "duration": info.get("duration", 0),
@@ -2805,7 +2825,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             status="completed", step=7, step_name="完成", progress=100, error=None
         )
         task["logs"].append("视频笔记生成完成")
-        notify_task("任务完成", f"视频笔记已生成：{title}")
+        notify_task("任务完成", f"视频笔记已生成：{note_title}")
         persist_task_runtime(task_id)
     except asyncio.CancelledError:
         finish_task_timing(task)
@@ -3030,15 +3050,19 @@ def format_publish_time(info: dict[str, Any]) -> str:
 
 
 def add_note_header_metadata(summary: str, title: str, info: dict[str, Any]) -> str:
-    """在模型标题下放置可验证的视频元信息，不让模型负责记住固定排版。"""
+    """用代码写死 H1，并在其下放置可验证的视频元信息。
+
+    H1 一律由这里写：``title`` 现在是 generate_note_title 产出的「短标题 + 风格
+    标签」，模型在正文里顺手写的 H1 必须让位，否则标题会随模型发挥漂移，
+    下载名与归档名也跟着变。
+    """
     value = summary.strip()
     lines = value.splitlines()
     if lines and lines[0].lstrip().startswith("#"):
-        heading = lines[0].strip()
         body = "\n".join(lines[1:]).lstrip()
     else:
-        heading = f"# 视频笔记：《{title}》"
         body = value
+    heading = f"# 视频笔记：《{title}》"
 
     body = strip_model_metadata_block(body)
 
@@ -3099,6 +3123,24 @@ def summary_style_label(style: str) -> str:
         "concise": "精简摘要",
         "keypoints": "要点提炼",
     }.get(style, style)
+
+
+def short_style_label(style: str) -> str:
+    """笔记标题里用的短标签（完整标签见 summary_style_label，留给页脚用）。"""
+    return {
+        "detailed": "详细",
+        "faithful": "详细复原",
+        "concise": "简要摘述",
+        "keypoints": "要点提炼",
+    }.get(style, style)
+
+
+def composite_note_title(short_title: str, style: str) -> str:
+    """拼出最终标题：``短标题（详细）``。短标题为空时返回空串，调用方据此降级。"""
+    base = (short_title or "").strip()
+    if not base:
+        return ""
+    return f"{base}（{short_style_label(style)}）"
 
 
 def content_type_label(content_type: str) -> str:

@@ -1883,7 +1883,7 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
         "# 视频笔记：《旧任务标题》"
     )
     assert (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8").startswith(
-        "# 复用成功"
+        "# 视频笔记：《旧任务标题（详细）》"
     )
 
 
@@ -2315,7 +2315,8 @@ async def test_single_part_task_archives_under_the_part_name(
 
     await main.process_video_task(task_id, request)
 
-    expected = "深度学习课【P2 第二章 梯度】"
+    # 标题现在 = 视频标题（短标题生成失败时的降级）+ 风格标签，分 P 后缀接在最后
+    expected = "深度学习课（详细）【P2 第二章 梯度】"
     assert main.tasks[task_id]["status"] == "completed"
     assert json.loads((tmp_path / task_id / "task.json").read_text("utf-8"))[
         "bili_pages"
@@ -3527,3 +3528,104 @@ def test_groq_transport_error_text_is_never_blank() -> None:
         assert rendered.strip() and type(exc).__name__ in rendered
 
     assert groq_asr._explain_transport_error(None).strip()
+
+
+def test_composite_note_title_appends_short_style_label() -> None:
+    """标题 = 短标题（风格短标签）；空标题返回空串，供调用方降级。"""
+    assert main.composite_note_title("大模型的记忆机制", "detailed") == "大模型的记忆机制（详细）"
+    assert main.composite_note_title("大模型的记忆机制", "concise") == "大模型的记忆机制（简要摘述）"
+    assert main.composite_note_title("大模型的记忆机制", "keypoints") == "大模型的记忆机制（要点提炼）"
+    assert main.composite_note_title("大模型的记忆机制", "faithful") == "大模型的记忆机制（详细复原）"
+    assert main.composite_note_title("", "detailed") == ""
+    assert main.composite_note_title("   ", "detailed") == ""
+
+
+def test_clean_title_strips_prefix_quotes_and_punctuation() -> None:
+    """模型常回「标题：xxx。」或带引号；标题要当文件名用，这些残留必须清掉。"""
+    from backend.llm_summarizer import _clean_title
+
+    assert _clean_title("标题：大模型的记忆机制。") == "大模型的记忆机制"
+    assert _clean_title("「大模型的记忆机制」") == "大模型的记忆机制"
+    assert _clean_title('  "大模型的记忆机制"\n多余的第二行') == "大模型的记忆机制"
+    assert _clean_title("") == ""
+    assert len(_clean_title("一" * 60)) == 20
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_generated_short_title_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """短标题 + 风格标签要贯通 H1、归档文件名、任务标题与下载名，
+    而不是继续用原视频标题。"""
+    old_task_id = "old-task"
+    new_task_id = "new-task"
+    old_dir = tmp_path / old_task_id
+    old_dir.mkdir()
+    (tmp_path / new_task_id).mkdir()
+    (old_dir / "transcript.json").write_text(
+        '{"language":"zh","source":"faster_whisper","segments":'
+        '[{"start":0,"end":12,"text":"这是一段讲大模型记忆机制的原始内容"}]}',
+        encoding="utf-8",
+    )
+    (old_dir / "notes.md").write_text(
+        "# 视频笔记：《原视频标题》\n\n---\n来源：https://www.bilibili.com/video/BV1xx\n",
+        encoding="utf-8",
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("reuse path must not call the platform or Whisper")
+
+    class FakeProcessor:
+        @staticmethod
+        def detect_source(*args, **kwargs):
+            return main.VideoSource.BILIBILI
+
+        get_video_info = forbidden
+        fetch_subtitles = forbidden
+        download_audio = forbidden
+
+    class FakeTranscriber:
+        transcribe = forbidden
+
+    class TitleSummarizer:
+        def __init__(self, **kwargs):
+            self.warnings = []
+
+        def describe_effort(self, reasoning_effort: str, style: str) -> str:
+            return reasoning_effort
+
+        async def generate_summary(
+            self, title, segments, metadata, style="detailed", reasoning_effort="auto",
+            progress_callback=None, should_abort=None, content_type="general",
+        ):
+            return "# 模型自己写的标题\n\n正文内容"
+
+        async def generate_note_title(self, summary, style="detailed", should_abort=None):
+            return "大模型的记忆机制"
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "video_processor", FakeProcessor())
+    monkeypatch.setattr(main, "transcriber", FakeTranscriber())
+    monkeypatch.setattr(main, "LLMSummarizer", TitleSummarizer)
+    main.tasks[new_task_id] = main.new_task()
+    main.tasks[new_task_id]["resume_task_id"] = old_task_id
+    request = main.SummarizeRequest(
+        video_url="https://www.bilibili.com/video/BV1xx",
+        summary_style="detailed",
+        llm_config=main.LLMConfig(model_type="glm", api_key="test-key"),
+    )
+
+    await main.process_video_task(new_task_id, request)
+
+    task = main.tasks[new_task_id]
+    assert task["status"] == "completed"
+    assert task["result"]["title"] == "大模型的记忆机制（详细）"
+    note_text = (tmp_path / new_task_id / "notes.md").read_text(encoding="utf-8")
+    # H1 用代码写死，模型顺手写的「# 模型自己写的标题」必须让位
+    assert note_text.startswith("# 视频笔记：《大模型的记忆机制（详细）》")
+    assert "模型自己写的标题" not in note_text
+    # 归档文件名同样带短标题与风格标签
+    archived = task["result"]["archived_path"]
+    assert archived and Path(archived).name == "大模型的记忆机制（详细）.md"
+    # 下载名与任务标题一致
+    assert main.task_status_payload(new_task_id, task)["download_name"] == "大模型的记忆机制（详细）"

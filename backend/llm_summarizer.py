@@ -113,6 +113,9 @@ CONTENT_TYPES = frozenset({"general", "tutorial", "knowledge", "learning"})
 TAIL_GAP_SECONDS = 60.0
 # 补尾时附带给模型参考的已有笔记结尾长度。
 NOTE_TAIL_CHARACTERS = 600
+# 笔记短标题的字数上限：标题会同时用作正文 H1、下载名与归档文件名，
+# 太长会挤压文件名里的「【P3 分P名】」后缀，也失去「简短标题」的意义。
+NOTE_TITLE_MAX_CHARS = 20
 # 补写结尾的三道护栏。成稿提示词明确允许“不必每段都加时间戳”，所以“笔记末尾时间戳
 # 落后于转写结尾”既可能是真的丢尾，也可能只是省略了时间戳。不加护栏时，后者会把
 # 整段剩余转录塞进一次 max 思考档的补写请求（几十分钟无任何进度反馈，表现为“卡住不动”，
@@ -266,6 +269,23 @@ def utf8_safe(text: str) -> str:
     看着完全像上游挂了），笔记正文则会把 notes.md 与 task.json 的写入一起带崩。
     """
     return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _clean_title(raw: str) -> str:
+    """把模型输出清洗成一行短标题（去引号/前缀/句末标点，截到上限）。
+
+    模型偶尔会回「标题：xxx。」或整段换行输出；标题要当文件名用，
+    这些残留会直接变成文件名里的怪字符，所以在这里统一清掉。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    line = text.splitlines()[0].strip().strip(" \t\"'“”「」『』《》")
+    for prefix in ("标题：", "标题:", "题目：", "题目:", "标题 "):
+        if line.startswith(prefix):
+            line = line[len(prefix) :].strip()
+    line = line.rstrip("。.，,；;！!？?")
+    return line[:NOTE_TITLE_MAX_CHARS]
 
 
 def _rejected_params_from_env() -> set[str]:
@@ -1002,6 +1022,53 @@ class LLMSummarizer:
             progress_callback,
             should_abort,
         )
+
+    async def generate_note_title(
+        self,
+        summary: str,
+        style: str = "detailed",
+        should_abort: Callable[[], bool] | None = None,
+    ) -> str:
+        """从成稿正文里提炼一个短标题（≤ ``NOTE_TITLE_MAX_CHARS`` 字）。
+
+        为什么单独一次极小调用，而不是让主提示词顺带输出标题：主提示词有分段、
+        续写、补写、重试好几条路径，标题那一行很容易被冲掉或格式走样；而标题
+        要拿去当文件名与归档名，必须稳定。失败时由调用方降级回原视频标题。
+        """
+        body = self._title_source_text(summary)
+        if not body:
+            return ""
+        prompt = (
+            "请为下面这份视频笔记拟一个简短标题。\n\n"
+            "要求：\n"
+            f"- 不超过 {NOTE_TITLE_MAX_CHARS} 个汉字，只输出一行\n"
+            "- 不要引号、不要句号、不要「标题：」这类前缀\n"
+            "- 概括这篇笔记真正在讲什么，不要照抄视频原名\n"
+            "- 不要出现「视频笔记」「笔记」「总结」这类空词\n\n"
+            f"笔记风格：{style}\n"
+            "笔记开头：\n"
+            f"{body}"
+        )
+        raw = await self._complete(
+            prompt,
+            max_tokens=64,
+            effort="off",
+            stage="拟定标题",
+            should_abort=should_abort,
+        )
+        return _clean_title(raw)
+
+    @staticmethod
+    def _title_source_text(summary: str) -> str:
+        """剥掉正文自带的 H1 与元信息引用行，只留可概括的开头内容。"""
+        lines = (summary or "").strip().splitlines()
+        while lines:
+            head = lines[0].lstrip()
+            if not head.strip() or head.startswith("#") or head.startswith(">"):
+                lines.pop(0)
+                continue
+            break
+        return "\n".join(lines).strip()[:1200]
 
     @staticmethod
     def _is_long_transcript(segments: Sequence[TranscriptSegment]) -> bool:
