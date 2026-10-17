@@ -1,11 +1,11 @@
 ---
-name: video-to-note
-description: Generate structured, timestamped Markdown notes from videos (Bilibili, Douyin, YouTube, or local media files) using the local VideoToNo service. Use when the user asks to summarize a video, turn a video/lecture/talk into notes, extract video content or a transcript, or mentions VideoToNo.
+name: ainote
+description: Generate structured, timestamped Markdown notes from videos (Bilibili, Douyin, YouTube, or local media files) using the local AINote service. Use when the user asks to summarize a video, turn a video/lecture/talk into notes, extract video content or a transcript, or mentions AINote.
 ---
 
-# VideoToNo · 视频笔记生成
+# AINote · 视频笔记生成
 
-通过本机运行的 VideoToNo 服务，把视频变成带时间轴的 Markdown 笔记：优先读取平台字幕（B 站 AI 字幕深度适配，支持多分 P 合并），没有字幕时用本地 faster-whisper 离线转写，最后由已配置的大模型生成笔记。
+通过本机运行的 AINote 服务，把视频变成带时间轴的 Markdown 笔记：优先读取平台字幕（B 站 AI 字幕深度适配，支持多分 P 合并），没有字幕时用本地 faster-whisper 离线转写，最后由已配置的大模型生成笔记。
 
 ## 先选路线
 
@@ -22,10 +22,10 @@ description: Generate structured, timestamped Markdown notes from videos (Bilibi
 
 ```bash
 curl -s --max-time 2 http://127.0.0.1:8000/api/health
-# 期望返回 {"status":"ok","service":"VideoToNo",...}
+# 期望返回 {"status":"ok","service":"AINote",...}
 ```
 
-全部端口不通时：请用户启动 VideoToNo（便携版 exe，或源码目录执行 `python launcher.py`），启动后重试。不要替用户猜端口以外的地址。
+全部端口不通时：请用户启动 AINote（便携版 exe，或源码目录执行 `python launcher.py`），启动后重试。不要替用户猜端口以外的地址。
 
 ## 推荐方式：用附带脚本一条命令完成
 
@@ -54,7 +54,7 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
   # 推荐：Key 从标准输入进来，不落 shell 历史也不进进程命令行
   printf '%s\n' "<用户给的 Key>" | python scripts/video_note.py "<链接>" --provider deepseek --api-key -
   # 或者用环境变量（同一条命令里赋值同样会留在历史里，长期会话请设为环境变量）
-  VIDEOTONOTES_LLM_API_KEY=... python scripts/video_note.py "<链接>" --provider deepseek
+  AINOTE_LLM_API_KEY=... python scripts/video_note.py "<链接>" --provider deepseek
   ```
 
   **不要把 Key 写成 `--api-key sk-xxx`**：命令行参数会留在 shell 历史、进程列表和 agent 的工具调用日志里，同用户的任何进程都能读到。脚本已把"看到的凭据一律换成掩码"作为兜底（自己发的告警、服务端回显的 4xx 详情都会洗），但兜底不等于源头干净。已保存的 Key 只在目标地址一致时复用，不会被发给别的网关。
@@ -83,7 +83,7 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
    # 都返回 {"task_id": "..."}；本地文件改为先 POST /api/upload 拿 upload_task_id
    ```
 
-   > 上面的 `"api_key": "sk-..."` 只是字段示意。真发请求时这条 curl 命令同样会留在 shell 历史里：**能省略就省略**（后端按 Base URL 复用本机已保存的 Key），必须带时用 `-d "{...\"api_key\": \"$VIDEOTONOTES_LLM_API_KEY\"...}"` 这类形式，别把 Key 写成字面量。
+   > 上面的 `"api_key": "sk-..."` 只是字段示意。真发请求时这条 curl 命令同样会留在 shell 历史里：**能省略就省略**（后端按 Base URL 复用本机已保存的 Key），必须带时用 `-d "{...\"api_key\": \"$AINOTE_LLM_API_KEY\"...}"` 这类形式，别把 Key 写成字面量。
 
 3. 轮询：`GET /api/task/{task_id}`，直到 `status` 变为 `completed` / `failed` / `cancelled`（`logs` 数组是实时运行日志）。转录任务的 `result` 里没有 `markdown`，`result.output` 是 `"transcript"`
 4. 取结果：

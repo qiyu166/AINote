@@ -44,7 +44,7 @@ Set-Location -LiteralPath $projectRoot
 # 所以这里主动挑一份 14.10+ 的 base，用 --add-binary 覆盖（已用实验包验明 --add-binary 赢过
 # 自动收集的同名条目）。CI 上没有 conda，会落到 System32，行为与从前一致。
 $vcRuntimeCandidates = @()
-if ($env:VIDEOTONOTES_VC_RUNTIME_DIR) { $vcRuntimeCandidates += $env:VIDEOTONOTES_VC_RUNTIME_DIR }
+if ($env:AINOTE_VC_RUNTIME_DIR) { $vcRuntimeCandidates += $env:AINOTE_VC_RUNTIME_DIR }
 $basePrefix = (& $Python -c "import sys; print(sys.base_prefix)").Trim()
 $vcRuntimeCandidates += (Join-Path $basePrefix "Library\bin")
 $vcRuntimeCandidates += $basePrefix
@@ -69,7 +69,7 @@ foreach ($dir in $vcRuntimeCandidates) {
 if (-not $vcRuntimeDir) {
     throw ("候选目录里没有 14.10+ 的 msvcp140.dll / vcruntime140.dll（查过：" +
            ($vcRuntimeCandidates -join "、") +
-           "）。装一份 VC++ 2015-2022 可再发行组件，或用 VIDEOTONOTES_VC_RUNTIME_DIR 指个目录。")
+           "）。装一份 VC++ 2015-2022 可再发行组件，或用 AINOTE_VC_RUNTIME_DIR 指个目录。")
 }
 
 # 取源目录里存在的这几个全用 --add-binary 钉死，让包内是同一代运行时——实验包就是这么打的，
@@ -134,7 +134,7 @@ foreach ($dllName in @("msvcp140.dll", "vcruntime140.dll")) {
     if ([int]$Matches[1] -lt 14 -or ([int]$Matches[1] -eq 14 -and [int]$Matches[2] -lt 10)) {
         throw ("包内 $dllName 是 $version，低于 14.10（取源目录 $vcRuntimeDir 没生效）。" +
                "这个包会在转写时崩掉用户的任务：先查上面的取源日志，必要时用 " +
-               "VIDEOTONOTES_VC_RUNTIME_DIR 指一份 14.10+ 的运行时再重打。")
+               "AINOTE_VC_RUNTIME_DIR 指一份 14.10+ 的运行时再重打。")
     }
 }
 

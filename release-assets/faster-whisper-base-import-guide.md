@@ -16,7 +16,7 @@
 ## 方式一：从 Release 附件 / 群文件下载（推荐，约 127 MB）
 
 1. 下载 `faster-whisper-base.zip`（SHA256 见文末）
-   - **GitHub Release 附件**：进入 VideoToNo 的 Release 页，展开“Assets / 附件”下载（若 Release 页因 GitHub 文件大小限制没有附带 ZIP，请改用方式二从镜像站直链下载，同样简单快速）；
+   - **GitHub Release 附件**：进入 AINote 的 Release 页，展开“Assets / 附件”下载（若 Release 页因 GitHub 文件大小限制没有附带 ZIP，请改用方式二从镜像站直链下载，同样简单快速）；
    - 或从**QQ 群文件**下载（如有）。
 2. 解压得到文件夹 `faster-whisper-base`，里面有 4 个文件：
    - `config.json`（2,309 字节）

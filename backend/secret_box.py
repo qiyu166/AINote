@@ -32,8 +32,8 @@ ALG_PLAIN = "plain-v1"
 ENTROPY_FILE_NAME = ".profile_entropy.bin"
 ENTROPY_MIN_BYTES = 16
 ENTROPY_BYTES = 32
-# 杀软/企业策略干扰 DPAPI 时的逃生口；命名对齐仓库既有的 VIDEOTONOTES_* 变量。
-DISABLE_DPAPI_ENV = "VIDEOTONOTES_DISABLE_DPAPI"
+# 杀软/企业策略干扰 DPAPI 时的逃生口；命名对齐仓库既有的 AINOTE_* 变量。
+DISABLE_DPAPI_ENV = "AINOTE_DISABLE_DPAPI"
 IS_WINDOWS = sys.platform == "win32"
 TRUTHY = {"1", "true", "yes", "on"}
 
@@ -184,7 +184,7 @@ def _dpapi_call(function: Any, data: bytes, entropy: bytes) -> bytes:
     blob, _input_guard = _make_blob(data)
     secret, _entropy_guard = _make_blob(entropy)
     output = _DataBlob()
-    ok = function(ctypes.byref(blob), "VideoToNo", ctypes.byref(secret), None, None, _CRYPTPROTECT_FLAGS, ctypes.byref(output))
+    ok = function(ctypes.byref(blob), "AINote", ctypes.byref(secret), None, None, _CRYPTPROTECT_FLAGS, ctypes.byref(output))
     if not ok:
         raise SecretBoxError("dpapi_failed", f"Windows 加密调用失败（错误码 {ctypes.GetLastError()}）")
     try:
@@ -212,7 +212,7 @@ def _detect_backend() -> str:
         LOGGER.warning("已通过 %s 关闭 DPAPI，本机 API Key 将以明文保存", DISABLE_DPAPI_ENV)
         return ALG_PLAIN
     try:
-        canary = "videotonotes-probe"
+        canary = "ainotetes-probe"
         entropy = secrets.token_bytes(ENTROPY_BYTES)
         sealed = _dpapi_protect(canary.encode("utf-8"), entropy)
         if _dpapi_unprotect(sealed, entropy).decode("utf-8") != canary:

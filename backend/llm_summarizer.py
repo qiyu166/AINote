@@ -269,13 +269,13 @@ def utf8_safe(text: str) -> str:
 
 
 def _rejected_params_from_env() -> set[str]:
-    """逃生口：`VIDEOTONOTES_REJECTED_LLM_PARAMS=thinking,reasoning_effort`。
+    """逃生口：`AINOTE_REJECTED_LLM_PARAMS=thinking,reasoning_effort`。
 
     跟 pi/pivi 的 `compat.supportsReasoningEffort` 同一思路：通道能力靠声明而不是
     猜名字。自动降级能覆盖绝大多数情况，但“每阶段都先吃一次 400 再重试”仍然很浪费
     时，遇到这种通道让用户一行环境变量声明掉即可（多个用逗号分隔）。
     """
-    raw = (os.getenv("VIDEOTONOTES_REJECTED_LLM_PARAMS") or "").lower()
+    raw = (os.getenv("AINOTE_REJECTED_LLM_PARAMS") or "").lower()
     return {
         name.strip()
         for name in raw.replace(" ", ",").split(",")

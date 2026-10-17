@@ -18,15 +18,15 @@ if ($All) {
         })
     foreach ($proc in $owned) {
         Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-        if (-not $Quiet) { Write-Host "Stopped VideoToNo dev server (PID $($proc.ProcessId))." -ForegroundColor Green }
+        if (-not $Quiet) { Write-Host "Stopped AINote dev server (PID $($proc.ProcessId))." -ForegroundColor Green }
     }
     if (-not $owned -and -not $Quiet) {
-        Write-Host "No VideoToNo dev server process found for this project." -ForegroundColor DarkGray
+        Write-Host "No AINote dev server process found for this project." -ForegroundColor DarkGray
     }
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
 
     # 打包版不在此列：它可能正跑着任务，且有托盘图标可以退，脚本不越俎代庖
-    $packaged = @(Get-Process -Name "VideoToNo*" -ErrorAction SilentlyContinue)
+    $packaged = @(Get-Process -Name "AINote*" -ErrorAction SilentlyContinue)
     if ($packaged -and -not $Quiet) {
         foreach ($proc in $packaged) {
             Write-Host "Packaged instance still running (PID $($proc.Id)) - not touched; quit it from its tray icon." -ForegroundColor Yellow
@@ -36,7 +36,7 @@ if ($All) {
 }
 
 if (-not (Test-Path -LiteralPath $statePath)) {
-    if (-not $Quiet) { Write-Host "VideoToNo is not running (no PID state file)." -ForegroundColor DarkGray }
+    if (-not $Quiet) { Write-Host "AINote is not running (no PID state file)." -ForegroundColor DarkGray }
     exit 0
 }
 
@@ -75,12 +75,12 @@ if ($listener) {
     $isVerifiedChild = $listenerInfo -and [int]$listenerInfo.ParentProcessId -eq $launcherPid -and $launcher
     $belongsToProject = $hasExpectedCommand -and ($hasProjectPath -or $isVerifiedChild -or $listenerPid -eq $launcherPid)
     if (-not $belongsToProject) {
-        throw "Listener PID $listenerPid cannot be verified as this VideoToNo instance; refusing to stop it."
+        throw "Listener PID $listenerPid cannot be verified as this AINote instance; refusing to stop it."
     }
 }
 if (-not $launcher -and -not $listener) {
     Remove-Item -LiteralPath $statePath -Force
-    if (-not $Quiet) { Write-Host "Removed stale VideoToNo PID state." -ForegroundColor DarkGray }
+    if (-not $Quiet) { Write-Host "Removed stale AINote PID state." -ForegroundColor DarkGray }
     exit 0
 }
 
@@ -89,4 +89,4 @@ if ($launcher -and $launcherPid -ne $listenerPid) {
     Stop-Process -Id $launcherPid -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-if (-not $Quiet) { Write-Host "VideoToNo stopped (PID $listenerPid)." -ForegroundColor Green }
+if (-not $Quiet) { Write-Host "AINote stopped (PID $listenerPid)." -ForegroundColor Green }

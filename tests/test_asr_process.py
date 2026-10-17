@@ -160,9 +160,9 @@ async def test_packaged_builds_route_transcription_to_the_worker(
 
 def test_worker_is_the_same_executable_when_frozen(monkeypatch) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", r"D:\x\VideoToNo-1.4.3-portable.exe")
+    monkeypatch.setattr(sys, "executable", r"D:\x\AINote-1.4.3-portable.exe")
     assert asr_process.child_command() == [
-        r"D:\x\VideoToNo-1.4.3-portable.exe",
+        r"D:\x\AINote-1.4.3-portable.exe",
         "--asr-child",
     ]
     assert asr_process.use_child_process() is True

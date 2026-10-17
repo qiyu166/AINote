@@ -1332,7 +1332,7 @@ class VideoProcessor:
         lines = ["# Netscape HTTP Cookie File"]
         for name, value in mapping:
             lines.append(f"{domain}\tTRUE\t/\tFALSE\t0\t{name}\t{value}")
-        fd, raw_path = tempfile.mkstemp(prefix="videotono-cookies-", suffix=".txt")
+        fd, raw_path = tempfile.mkstemp(prefix="ainote-cookies-", suffix=".txt")
         os.close(fd)
         path = Path(raw_path)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

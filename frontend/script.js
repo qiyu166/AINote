@@ -179,7 +179,7 @@ function safeStep(action, label) {
     try {
         action();
     } catch (error) {
-        console.error(`[VideoToNo] ${label} 初始化失败：`, error);
+        console.error(`[AINote] ${label} 初始化失败：`, error);
     }
 }
 
@@ -350,7 +350,7 @@ function bindListener(id, event, handler) {
     if (element) {
         element.addEventListener(event, handler);
     } else {
-        console.warn(`[VideoToNo] 页面缺少元素 #${id}，已跳过对应事件绑定`);
+        console.warn(`[AINote] 页面缺少元素 #${id}，已跳过对应事件绑定`);
     }
 }
 
@@ -845,7 +845,7 @@ function sanitizeForStorage(value) {
         const clean = {};
         Object.entries(value).forEach(([key, item]) => {
             if (SECRET_FIELD_PATTERN.test(key)) {
-                console.warn(`[VideoToNo] 拒绝把敏感字段 ${key} 写入浏览器存储`);
+                console.warn(`[AINote] 拒绝把敏感字段 ${key} 写入浏览器存储`);
                 return;
             }
             const sanitized = sanitizeForStorage(item);
@@ -864,7 +864,7 @@ function persistPrefs() {
     try {
         localStorage.setItem(PREFS_KEY, JSON.stringify(sanitizeForStorage(prefs)));
     } catch (error) {
-        console.warn('[VideoToNo] 偏好保存失败（浏览器可能禁用了本地存储）：', error);
+        console.warn('[AINote] 偏好保存失败（浏览器可能禁用了本地存储）：', error);
     }
 }
 
@@ -905,7 +905,7 @@ function legacyWhisperConfirms() {
                 localStorage.removeItem(key);
             });
     } catch (error) {
-        console.warn('[VideoToNo] 迁移下载确认记录失败：', error);
+        console.warn('[AINote] 迁移下载确认记录失败：', error);
     }
     return confirmed;
 }
@@ -1011,7 +1011,7 @@ function initPreferences() {
         stored = migrateLegacyPrefs() || mergePrefs(readStoredPrefs());
     } catch (error) {
         // 隐私模式等禁用本地存储时，只丢"记住上次的选择"，页面必须照常可用。
-        console.warn('[VideoToNo] 读取历史偏好失败，改用默认设置：', error);
+        console.warn('[AINote] 读取历史偏好失败，改用默认设置：', error);
     }
     prefs = stored || defaultPrefs();
     if (!PROVIDER_CONFIG[prefs.provider]) prefs.provider = defaultProvider();
@@ -1214,7 +1214,7 @@ function resetPreferences() {
     try {
         localStorage.removeItem(PREFS_KEY);
     } catch (error) {
-        console.warn('[VideoToNo] 清除偏好失败：', error);
+        console.warn('[AINote] 清除偏好失败：', error);
     }
     prefs = defaultPrefs();
     applyPreferencesToForm();
@@ -3473,12 +3473,12 @@ async function probeHealth() {
     try {
         const response = await fetchWithTimeout(`${API_BASE}/health`, {}, 2500);
         const data = await response.json().catch(() => null);
-        if (data && data.service === 'VideoToNo') {
+        if (data && data.service === 'AINote') {
             return '本机服务在答话，但刚才那个 5xx 的响应体不是它发的 JSON，多半是后端内部崩了'
                 + '（详情在 workspace\\_app.log；可点「本机自检」看完整报告）';
         }
         if (data) {
-            return `这个端口的应答不是 VideoToNo（${JSON.stringify(data).slice(0, 80)}）`
+            return `这个端口的应答不是 AINote（${JSON.stringify(data).slice(0, 80)}）`
                 + '——端口被别的程序占着，托盘退出重开试试';
         }
         return '应答不是 JSON——端口八成被别的程序占了，托盘退出重开试试';
@@ -3513,7 +3513,7 @@ function formatDiagnosticsText(payload, healthVerdict) {
     if (payload && payload.ok) {
         const checks = payload.checks || {};
         const service = checks.service || {};
-        lines.push(`服务：VideoToNo v${service.version}（PID ${service.pid}，端口 ${service.port}，已运行 ${service.uptime_s} 秒）`);
+        lines.push(`服务：AINote v${service.version}（PID ${service.pid}，端口 ${service.port}，已运行 ${service.uptime_s} 秒）`);
         const loopback = checks.loopback_http || {};
         lines.push(`本机应答：${loopback.ok
             ? `HTTP ${loopback.status}，${loopback.is_ours ? '是本程序' : '不是本程序！'}`

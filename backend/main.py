@@ -91,7 +91,7 @@ from .whisper_asr import WhisperTranscriber
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 WORKSPACE_DIR = Path(
-    os.getenv("VIDEOTONOTES_WORKSPACE", str(BASE_DIR / "workspace"))
+    os.getenv("AINOTE_WORKSPACE", str(BASE_DIR / "workspace"))
 ).resolve()
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 WHISPER_CACHE_DIR = Path(
@@ -158,7 +158,7 @@ NOTE_IMAGE_REF_RE = re.compile(
     rf"(!\[[^\]]*\]\()\./(?:{FRAMES_DIR_NAME}|images)/([^)]+)\)"
 )
 
-app = FastAPI(title="VideoToNo API", version="1.4.5")
+app = FastAPI(title="AINote API", version="1.4.5")
 
 
 def is_loopback_client(host: str | None) -> bool:
@@ -256,7 +256,7 @@ class LocalSecurityMiddleware:
                 break
         if not is_loopback_client(client_host) or not is_loopback_host_header(host_header):
             body = json.dumps(
-                {"detail": "VideoToNo 仅允许本机访问"}, ensure_ascii=False
+                {"detail": "AINote 仅允许本机访问"}, ensure_ascii=False
             ).encode("utf-8")
             await send(
                 {
@@ -315,10 +315,10 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
 
 
 FRONTEND_MISSING_HTML = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>VideoToNo 界面没加载出来</title></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>AINote 界面没加载出来</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:34em;margin:14vh auto;padding:0 1.2em;line-height:1.9">
 <h1>界面没加载出来</h1>
-<p><strong>这样做就好：</strong>在右下角任务栏找到 VideoToNo 图标，右键选「退出」，
+<p><strong>这样做就好：</strong>在右下角任务栏找到 AINote 图标，右键选「退出」，
 再双击打开程序。找不到那个图标的话，直接再双击一次程序也行。</p>
 <p>要是反复出现，请把程序目录里 <code>workspace\\_app.log</code> 发给作者，
 并说一下你地址栏里的端口号（这台机器上是 __PORT__）。</p>
@@ -1628,7 +1628,7 @@ async def preview_bilibili_pages(request: BiliPagesRequest) -> dict[str, Any]:
 async def health_check() -> dict[str, Any]:
     return {
         "status": "ok",
-        "service": "VideoToNo",
+        "service": "AINote",
         "version": app.version,
         # portable/dev 互不复用对方实例，避免 dev 服务占用端口导致打包版不驻留托盘
         "mode": "portable" if getattr(sys, "frozen", False) else "dev",
@@ -1669,7 +1669,7 @@ def _http_probe(url: str, timeout: float = 4.0, *, use_proxy: bool) -> dict[str,
         else:
             # 本机回环与直连对照都必须绕开代理：urllib 在 Windows 会读注册表系统代理
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        request = urllib.request.Request(url, headers={"User-Agent": "VideoToNo-diagnostics"})
+        request = urllib.request.Request(url, headers={"User-Agent": "AINote-diagnostics"})
         with opener.open(request, timeout=timeout) as response:
             body = response.read(240)
             return {
@@ -1785,7 +1785,7 @@ async def run_diagnostics(request: Request) -> dict[str, Any]:
         identity = json.loads(str(loopback.get("body") or "null"))
     except ValueError:
         pass
-    is_ours = isinstance(identity, dict) and identity.get("service") == "VideoToNo"
+    is_ours = isinstance(identity, dict) and identity.get("service") == "AINote"
     checks["loopback_http"] = {**loopback, "is_ours": is_ours}
     if loopback.get("ok") and not is_ours:
         hints.append(
@@ -3391,14 +3391,14 @@ THINK_MODES: dict[str, dict[str, str]] = {
     "sprout": {
         "suffix": SPROUT_REPORT_SUFFIX,
         "fallback_title": "# 🌱 新知卡片",
-        "footer": "由 VideoToNo 发芽生成（按「得到大脑」发芽模式：种子 → 跨界碰撞 → 启发）",
+        "footer": "由 AINote 发芽生成（按「得到大脑」发芽模式：种子 → 跨界碰撞 → 启发）",
         "link_label": "发芽报告",
         "name": "发芽",
     },
     "interrogate": {
         "suffix": " · 拷问",
         "fallback_title": "# ⚔️ 拷问",
-        "footer": "由 VideoToNo 拷问生成（按「得到大脑」拷问模式：挑漏洞 + 强制替代方案，"
+        "footer": "由 AINote 拷问生成（按「得到大脑」拷问模式：挑漏洞 + 强制替代方案，"
         "每条判断都附了原片定位）",
         "link_label": "拷问",
         "name": "拷问",
@@ -3406,7 +3406,7 @@ THINK_MODES: dict[str, dict[str, str]] = {
     "quiz": {
         "suffix": " · 自测",
         "fallback_title": "# 🎯 自测",
-        "footer": "由 VideoToNo 自测生成（题目与答案，答案里附了原片定位）",
+        "footer": "由 AINote 自测生成（题目与答案，答案里附了原片定位）",
         "link_label": "自测",
         "name": "自测",
     },
@@ -3642,7 +3642,7 @@ def write_aggregate_sprout_report(
                     *body,
                     "",
                     "---",
-                    "由 VideoToNo 整体发芽生成"
+                    "由 AINote 整体发芽生成"
                     "（按「得到大脑」发芽模式：跨篇种子 → 跨界碰撞 → 启发）",
                     "",
                 ]
@@ -3842,7 +3842,7 @@ if FRONTEND_DIR.is_dir():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
-    os.environ.setdefault("VIDEOTONOTES_BACKEND_URL", f"http://127.0.0.1:{port}")
+    os.environ.setdefault("AINOTE_BACKEND_URL", f"http://127.0.0.1:{port}")
     uvicorn.run(
         "backend.main:app",
         host=os.getenv("HOST", "127.0.0.1"),

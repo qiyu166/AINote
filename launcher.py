@@ -1,4 +1,4 @@
-"""VideoToNo 启动器。
+"""AINote 启动器。
 
 开发模式（`python launcher.py`）：
   - 控制台窗口显示地址，Ctrl+C 退出
@@ -29,7 +29,7 @@ VERSION = "1.4.5"
 DEFAULT_PORT = 8000
 PORT_SCAN_RANGE = 20
 START_TIMEOUT_SECONDS = 60
-APP_NAME = f"VideoToNo v{VERSION}"
+APP_NAME = f"AINote v{VERSION}"
 
 
 def is_frozen() -> bool:
@@ -55,15 +55,15 @@ def configure_runtime_dirs() -> None:
         except OSError:
             # exe 所在目录不可写时（如 Program Files），退回用户目录
             local_app_data = os.environ.get("LOCALAPPDATA")
-            fallback_root = Path(local_app_data) if local_app_data else Path.home() / ".videotono"
-            default_workspace = fallback_root / "VideoToNo" / "workspace"
+            fallback_root = Path(local_app_data) if local_app_data else Path.home() / ".ainote"
+            default_workspace = fallback_root / "AINote" / "workspace"
             default_workspace.mkdir(parents=True, exist_ok=True)
     else:
         default_workspace = base_dir() / "workspace"
         default_workspace.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("VIDEOTONOTES_WORKSPACE", str(default_workspace))
+    os.environ.setdefault("AINOTE_WORKSPACE", str(default_workspace))
     # 环境变量覆盖的路径也要确保存在：打包版写日志文件前依赖此目录，缺失会启动崩溃
-    Path(os.environ["VIDEOTONOTES_WORKSPACE"]).mkdir(parents=True, exist_ok=True)
+    Path(os.environ["AINOTE_WORKSPACE"]).mkdir(parents=True, exist_ok=True)
 
 
 RUN_MODE = "portable" if is_frozen() else "dev"
@@ -84,7 +84,7 @@ def server_alive(
             if response.status != 200:
                 return False
             payload = json.loads(response.read().decode("utf-8"))
-            if not (payload.get("status") == "ok" and payload.get("service") == "VideoToNo"):
+            if not (payload.get("status") == "ok" and payload.get("service") == "AINote"):
                 return False
             if mode is not None and payload.get("mode") != mode:
                 return False
@@ -122,7 +122,7 @@ def start_server(port: int) -> tuple[Any, threading.Thread]:
     import uvicorn
 
     # 后端自调用端点时需要知道自己挂在哪个端口（ASR 子进程与静态资源都读它）
-    os.environ.setdefault("VIDEOTONOTES_BACKEND_URL", f"http://127.0.0.1:{port}")
+    os.environ.setdefault("AINOTE_BACKEND_URL", f"http://127.0.0.1:{port}")
     from backend.main import app
 
     config = uvicorn.Config(
@@ -159,7 +159,7 @@ def wait_healthy(
 def print_banner(url: str, workspace: Path) -> None:
     width = 58
     print("=" * width)
-    print("  VideoToNo v" + VERSION + "（开发模式）")
+    print("  AINote v" + VERSION + "（开发模式）")
     print(f"  界面地址: {url}")
     print(f"  工作目录: {workspace}")
     print("  关闭本窗口或按 Ctrl+C 退出。")
@@ -231,8 +231,8 @@ def main() -> int:
 
         return child_main()
     configure_runtime_dirs()
-    workspace = Path(os.environ["VIDEOTONOTES_WORKSPACE"])
-    no_browser = os.environ.get("VIDEOTONOTES_NO_BROWSER") == "1"
+    workspace = Path(os.environ["AINOTE_WORKSPACE"])
+    no_browser = os.environ.get("AINOTE_NO_BROWSER") == "1"
 
     try:
         port = find_available_port()

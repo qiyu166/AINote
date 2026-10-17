@@ -15,7 +15,7 @@ $stdoutPath = Join-Path $runtimeDir "server.stdout.log"
 $stderrPath = Join-Path $runtimeDir "server.stderr.log"
 
 # 打包版启动后会自动开页，开发脚本此前只打印 URL，两边行为不一致
-function Open-VideoToNoPage([string]$url) {
+function Open-AINotePage([string]$url) {
     if ($NoBrowser) { return }
     Start-Process $url
 }
@@ -38,7 +38,7 @@ if (-not $BindHost) {
     $BindHost = if ($env:HOST) { $env:HOST } elseif ($fileConfig.HOST) { $fileConfig.HOST } else { "127.0.0.1" }
 }
 if ($BindHost -notin @("127.0.0.1", "localhost", "::1")) {
-    throw "VideoToNo 1.0 is local-only. BindHost must be 127.0.0.1, localhost, or ::1."
+    throw "AINote 1.0 is local-only. BindHost must be 127.0.0.1, localhost, or ::1."
 }
 if ($null -eq $Port) {
     $portValue = if ($env:PORT) { $env:PORT } elseif ($fileConfig.PORT) { $fileConfig.PORT } else { "8000" }
@@ -54,11 +54,11 @@ if (Test-Path -LiteralPath $statePath) {
         $state = Get-Content -LiteralPath $statePath -Raw -Encoding utf8 | ConvertFrom-Json
         $existing = Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue
         if ($existing) {
-            Write-Host "VideoToNo is already running (PID $($state.pid)): $($state.url)" -ForegroundColor Green
+            Write-Host "AINote is already running (PID $($state.pid)): $($state.url)" -ForegroundColor Green
             if ($PSBoundParameters.ContainsKey("Port") -and $state.url -ne "http://${BindHost}:$Port") {
                 Write-Host "Requested port $Port was NOT used - one instance per state file; run .\stop.ps1 -All first." -ForegroundColor Yellow
             }
-            Open-VideoToNoPage $state.url
+            Open-AINotePage $state.url
             exit 0
         }
     } catch {
@@ -80,7 +80,7 @@ $reloadEnabled = $reloadValue -eq "true"
 
 if ($Foreground) {
     if ($reloadEnabled) { $arguments += "--reload" }
-    Write-Host "Starting VideoToNo in foreground: http://${BindHost}:$Port" -ForegroundColor Cyan
+    Write-Host "Starting AINote in foreground: http://${BindHost}:$Port" -ForegroundColor Cyan
     & $python @arguments
     exit $LASTEXITCODE
 }
@@ -121,7 +121,7 @@ if (-not $healthy) {
     $details = if (Test-Path -LiteralPath $stderrPath) {
         (Get-Content -LiteralPath $stderrPath -Tail 8 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
     } else { "No server error log was produced." }
-    throw "VideoToNo failed to start.`n$details"
+    throw "AINote failed to start.`n$details"
 }
 
 $listenerPid = $process.Id
@@ -143,6 +143,6 @@ $state = [ordered]@{
 }
 $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
-Write-Host "VideoToNo started (PID $listenerPid): $url" -ForegroundColor Green
+Write-Host "AINote started (PID $listenerPid): $url" -ForegroundColor Green
 Write-Host "Stop it with .\stop.ps1 (orphaned instances: .\stop.ps1 -All); logs are in .runtime\." -ForegroundColor DarkGray
-Open-VideoToNoPage $url
+Open-AINotePage $url

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""VideoToNo Agent Skill 脚本：一条命令完成"视频 → 笔记"。
+"""AINote Agent Skill 脚本：一条命令完成"视频 → 笔记"。
 
-自动探测本机 VideoToNo 服务端口（8000-8019），提交任务、轮询进度、
+自动探测本机 AINote 服务端口（8000-8019），提交任务、轮询进度、
 输出完整 Markdown 笔记。仅依赖 Python 标准库。
 
 用法:
@@ -16,7 +16,7 @@
     --no-reuse                            禁止复用同链接已有转录，强制重新转写
     --provider {deepseek,openai,qwen,glm,moonshot,custom}
     --api-key -                           大模型 API Key（- 表示从标准输入读）
-                                          也可设环境变量 VIDEOTONOTES_LLM_API_KEY；
+                                          也可设环境变量 AINOTE_LLM_API_KEY；
                                           该地址已保存到本机时两者都可省略
     --wait SECONDS                        最长等待秒数（默认 1800）
     --out PATH                            把笔记写入文件（默认打印到 stdout）
@@ -42,7 +42,7 @@ POLL_INTERVAL_SECONDS = 3
 PROVIDERS = {"deepseek", "openai", "openai_gpt4", "openai_gpt35", "qwen", "glm", "moonshot", "custom"}
 UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 # Key 走命令行会留在 shell 历史与进程列表里，所以默认鼓励用环境变量或 stdin
-API_KEY_ENV = "VIDEOTONOTES_LLM_API_KEY"
+API_KEY_ENV = "AINOTE_LLM_API_KEY"
 SK_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
 ECHO_PATTERN = re.compile(
     r"\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bearer|sessdata|bili_jct)"
@@ -67,7 +67,7 @@ def redact(text: str) -> str:
 
 
 def die(message: str, code: int = 1) -> "None":
-    print(f"[VideoToNo] {redact(message)}", file=sys.stderr)
+    print(f"[AINote] {redact(message)}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -77,7 +77,7 @@ def http_json(method: str, url: str, body: dict | None = None, timeout: float = 
         url,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json", "User-Agent": "VideoToNo-Skill/1.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "AINote-Skill/1.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -94,18 +94,18 @@ def http_json(method: str, url: str, body: dict | None = None, timeout: float = 
 
 
 def find_service() -> str:
-    """扫描 8000-8019，返回 VideoToNo 服务的 base url。"""
+    """扫描 8000-8019，返回 AINote 服务的 base url。"""
     for port in PORT_RANGE:
         url = f"http://127.0.0.1:{port}"
         try:
             with urllib.request.urlopen(f"{url}/api/health", timeout=1.5) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            if payload.get("status") == "ok" and payload.get("service") == "VideoToNo":
+            if payload.get("status") == "ok" and payload.get("service") == "AINote":
                 return url
         except Exception:
             continue
     die(
-        "本机 8000-8019 端口未发现 VideoToNo 服务。请先启动 VideoToNo"
+        "本机 8000-8019 端口未发现 AINote 服务。请先启动 AINote"
         "（便携版 exe，或源码目录执行 python launcher.py）后重试。"
     )
 
@@ -132,7 +132,7 @@ def upload_file(base: str, path: Path) -> str:
     size = path.stat().st_size
     if size > UPLOAD_LIMIT_BYTES:
         die(f"文件超过上传上限 2GB：{path}（{size} 字节）")
-    boundary = f"----videotono{uuid.uuid4().hex}"
+    boundary = f"----ainote{uuid.uuid4().hex}"
     body = b"".join(
         [
             f"--{boundary}\r\n".encode(),
@@ -158,7 +158,7 @@ def upload_file(base: str, path: Path) -> str:
         except Exception:
             pass
         die(f"上传失败：HTTP {exc.code} {detail or exc.reason}")
-    print(f"[VideoToNo] 本地文件已上传（{size} 字节）")
+    print(f"[AINote] 本地文件已上传（{size} 字节）")
     return payload["task_id"]
 
 
@@ -176,24 +176,24 @@ def poll_task(base: str, task_id: str, wait_seconds: int) -> dict:
             return task
         if status == "failed":
             error_text = str(task.get("error") or "未知原因")
-            print(f"[VideoToNo] 任务失败：{redact(error_text)}", file=sys.stderr)
+            print(f"[AINote] 任务失败：{redact(error_text)}", file=sys.stderr)
             if "API Key" in error_text:
                 print(
-                    "[VideoToNo] 提示：该接口地址本机没有可复用的 Key。把 Key 交给环境变量"
+                    "[AINote] 提示：该接口地址本机没有可复用的 Key。把 Key 交给环境变量"
                     f" {API_KEY_ENV}（或 --api-key - 从标准输入读）后重跑，"
                     "或在网页「总结模型」填入 Key 并点「保存到本机」。",
                     file=sys.stderr,
                 )
-            print(f"[VideoToNo] 可复用中间产物重试，task_id={task_id}", file=sys.stderr)
+            print(f"[AINote] 可复用中间产物重试，task_id={task_id}", file=sys.stderr)
             sys.exit(2)
         if status == "cancelled":
             die(f"任务已取消（task_id={task_id}）", code=2)
         if time.monotonic() > deadline:
             print(
-                f"[VideoToNo] 等待超时（{wait_seconds} 秒），任务仍在后台运行：task_id={task_id}",
+                f"[AINote] 等待超时（{wait_seconds} 秒），任务仍在后台运行：task_id={task_id}",
                 file=sys.stderr,
             )
-            print(f"[VideoToNo] 稍后可用 GET {base}/api/task/{task_id} 继续查询", file=sys.stderr)
+            print(f"[AINote] 稍后可用 GET {base}/api/task/{task_id} 继续查询", file=sys.stderr)
             sys.exit(3)
         time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -207,12 +207,12 @@ def resolve_api_key(args) -> str:
     raw = (args.api_key or "").strip()
     if raw == "-":
         if sys.stdin.isatty():
-            print("[VideoToNo] 请输入 API Key（一行，回车结束）：", file=sys.stderr)
+            print("[AINote] 请输入 API Key（一行，回车结束）：", file=sys.stderr)
         # 只读一行：管道里 printf 出来的 Key 不必等 EOF，终端里手输回车即可
         return sys.stdin.readline().strip()
     if raw:
         print(
-            f"[VideoToNo] 提示：--api-key 会留在 shell 历史与进程列表里；下次请改用环境变量"
+            f"[AINote] 提示：--api-key 会留在 shell 历史与进程列表里；下次请改用环境变量"
             f" {API_KEY_ENV}，或 --api-key - 从标准输入读。",
             file=sys.stderr,
         )
@@ -227,7 +227,7 @@ def main() -> None:
     except Exception:
         pass
 
-    parser = argparse.ArgumentParser(description="VideoToNo：视频 → 带时间轴的 Markdown 笔记")
+    parser = argparse.ArgumentParser(description="AINote：视频 → 带时间轴的 Markdown 笔记")
     parser.add_argument("source", help="视频链接（B站/抖音/YouTube）或本地媒体文件路径")
     parser.add_argument(
         "--style",
@@ -287,7 +287,7 @@ def main() -> None:
         )
 
     base = find_service()
-    print(f"[VideoToNo] 服务已连接：{base}")
+    print(f"[AINote] 服务已连接：{base}")
 
     source_path = Path(args.source)
     if transcript_only:
@@ -336,7 +336,7 @@ def main() -> None:
             die(f"输入既不是有效链接也不是存在的本地文件：{args.source}")
         payload["video_url"] = args.source.strip()
 
-    print("[VideoToNo] 正在提交任务…")
+    print("[AINote] 正在提交任务…")
     try:
         result = http_json("POST", f"{base}{endpoint}", payload, timeout=60)
     except RuntimeError as exc:
@@ -357,8 +357,8 @@ def main() -> None:
     if not task_id:
         die(f"提交失败：服务未返回 task_id（{result}）")
     if result.get("reused_task_id"):
-        print(f"[VideoToNo] 已复用任务 {result['reused_task_id']} 的转录结果")
-    print(f"[VideoToNo] 任务已创建：{task_id}，开始等待完成…")
+        print(f"[AINote] 已复用任务 {result['reused_task_id']} 的转录结果")
+    print(f"[AINote] 任务已创建：{task_id}，开始等待完成…")
 
     task = poll_task(base, task_id, args.wait)
     task_result = task.get("result") or {}
@@ -378,13 +378,13 @@ def main() -> None:
         die(f"任务完成但未返回{label}内容", code=2)
     if args.out:
         Path(args.out).write_text(body, encoding="utf-8")
-        print(f"[VideoToNo] {label}已保存：{args.out}")
+        print(f"[AINote] {label}已保存：{args.out}")
     else:
         print("\n" + "=" * 58 + "\n")
         print(body)
     output_dir = task_result.get("output_directory")
     if output_dir:
-        print(f"\n[VideoToNo] 产物目录：{output_dir}")
+        print(f"\n[AINote] 产物目录：{output_dir}")
 
 
 if __name__ == "__main__":

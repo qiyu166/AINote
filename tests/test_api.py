@@ -139,13 +139,13 @@ def test_health_and_frontend_are_served() -> None:
     assert health.status_code == 200
     assert health.json()["version"] == "1.4.5"
     assert health.json()["version"] == launcher.VERSION
-    assert health.json()["service"] == "VideoToNo"
+    assert health.json()["service"] == "AINote"
     assert health.json()["mode"] == "dev"  # 测试进程非打包；打包版应报 portable
     # MCP 已按需移除：健康接口不再报告 mcp_sse 字段
     assert "mcp_sse" not in health.json()["dependencies"]
     page = client.get("/")
     assert page.status_code == 200
-    assert "VideoToNo" in page.text
+    assert "AINote" in page.text
     # MCP 相关的 UI（接入卡片 / 状态芯片 / 提示条）已按需移除
     for removed in ("mcpSseUrl", "mcpStatusChip", "mcpHint", "copyMcpConfigBtn", "mcpUnavailable"):
         assert f'id="{removed}"' not in page.text, f"{removed} 已移除，不该再出现"
@@ -214,7 +214,7 @@ def test_remote_clients_are_rejected() -> None:
     assert health.status_code == 403
     page = client.get("/")
     assert page.status_code == 403
-    assert page.json()["detail"] == "VideoToNo 仅允许本机访问"
+    assert page.json()["detail"] == "AINote 仅允许本机访问"
 
 
 def test_frontend_sanitizes_generated_markdown() -> None:
@@ -882,7 +882,7 @@ def test_dns_rebinding_host_is_rejected() -> None:
     )
     response = rebound.get("/api/tasks")
     assert response.status_code == 403
-    assert response.json()["detail"] == "VideoToNo 仅允许本机访问"
+    assert response.json()["detail"] == "AINote 仅允许本机访问"
 
 
 def test_link_sprout_from_note_keeps_backup_and_replaces_atomically(
@@ -2922,7 +2922,7 @@ def test_diagnostics_reports_probe_results_without_secrets(
 
     def fake_probe(url: str, timeout: float = 4.0, *, use_proxy: bool) -> dict:
         if "127.0.0.1" in url:
-            return {"ok": True, "status": 200, "body": json.dumps({"service": "VideoToNo"})}
+            return {"ok": True, "status": 200, "body": json.dumps({"service": "AINote"})}
         return {"ok": True, "status": 200, "body": ""}
 
     monkeypatch.setattr(main, "_http_probe", fake_probe)

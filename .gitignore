@@ -52,3 +52,6 @@ Thumbs.db
 # 二创新增：本地安全修复的备份与临时产物
 .backup-before-review-fixes/
 :memory:.ses
+
+# 本机会话台账（含本机路径与排障记录，不入库）
+ASSUMPTIONS.md

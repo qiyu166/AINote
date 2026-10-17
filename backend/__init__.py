@@ -1,1 +1,1 @@
-"""VideoToNo backend package."""
+"""AINote backend package."""

@@ -25,7 +25,7 @@ from .whisper_asr import TranscriptionCancelledError
 from .transcript import TranscriptSegment
 
 HF_ENDPOINT = "https://hf-mirror.com"
-HEADERS = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
+HEADERS = {"User-Agent": "AINote/1.0", "Accept-Encoding": "identity"}
 
 # 每个组件的 HF 仓库与必需文件（sherpa-onnx 转换版把词表内嵌进 onnx 元数据，
 # 所以标点只需要 model.onnx；ASR 需要 tokens.txt）。

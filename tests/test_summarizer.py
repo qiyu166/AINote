@@ -1327,7 +1327,7 @@ def test_is_official_deepseek_only_matches_deepseek_endpoints() -> None:
 
 def test_env_declared_rejected_params_skip_injection(monkeypatch: pytest.MonkeyPatch) -> None:
     """逃生口：用环境变量声明通道不支持的思考参数（对齐 pi/pivi 的 compat 能力声明）。"""
-    monkeypatch.setenv("VIDEOTONOTES_REJECTED_LLM_PARAMS", "thinking, reasoning_effort, reasoning , bogus")
+    monkeypatch.setenv("AINOTE_REJECTED_LLM_PARAMS", "thinking, reasoning_effort, reasoning , bogus")
     summarizer = object.__new__(LLMSummarizer)
     summarizer.model_type = "deepseek"
     summarizer.model = "deepseek-v4-flash"

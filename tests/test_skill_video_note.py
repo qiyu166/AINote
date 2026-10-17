@@ -1,6 +1,6 @@
 """Agent Skill 脚本的凭据处理测试。
 
-`skills/video-to-note/scripts/video_note.py` 不在包里（没有可导入的包路径），
+`skills/ainote/scripts/video_note.py` 不在包里（没有可导入的包路径），
 所以用 importlib 按文件加载——这个脚本是发给用户机器跑的，Key 的来路和出口
 必须钉住：命令行明文要能换成环境变量/stdin，任何回显凭据的文本都要先脱敏。
 """
@@ -16,7 +16,7 @@ import pytest
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "skills"
-    / "video-to-note"
+    / "ainote"
     / "scripts"
     / "video_note.py"
 )

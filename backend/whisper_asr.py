@@ -393,7 +393,7 @@ class WhisperTranscriber:
         """从单个 Hugging Face endpoint 下载完整快照。"""
         repo = self._model_repo(model_name)
         base_url = f"{endpoint}/{repo}/resolve/main"
-        headers = {"User-Agent": "VideoToNo/1.0", "Accept-Encoding": "identity"}
+        headers = {"User-Agent": "AINote/1.0", "Accept-Encoding": "identity"}
 
         # 从 307 重定向响应头取 commit hash（目录命名用）
         commit = "main"

@@ -17,7 +17,7 @@ def test_server_alive_requires_matching_version(monkeypatch) -> None:
             return False
 
         def read(self):
-            return b'{"status":"ok","service":"VideoToNo","mode":"portable","version":"1.1.7"}'
+            return b'{"status":"ok","service":"AINote","mode":"portable","version":"1.1.7"}'
 
     monkeypatch.setattr(launcher.urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
 
@@ -29,7 +29,7 @@ def test_configure_runtime_dirs_creates_custom_workspace(monkeypatch, tmp_path) 
     """环境变量指定的 workdir 不存在时也要自动创建（打包版写日志前依赖此目录）。"""
     custom = tmp_path / "custom-ws"
     assert not custom.exists()
-    monkeypatch.setenv("VIDEOTONOTES_WORKSPACE", str(custom))
+    monkeypatch.setenv("AINOTE_WORKSPACE", str(custom))
     monkeypatch.setattr(launcher, "is_frozen", lambda: False)
     launcher.configure_runtime_dirs()
     assert custom.is_dir()
