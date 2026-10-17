@@ -48,3 +48,7 @@ Thumbs.db
 /sopath.txt
 # ZCode 的索引排除清单（本机工具配置，勿提交）
 /.zcodeignore
+
+# 二创新增：本地安全修复的备份与临时产物
+.backup-before-review-fixes/
+:memory:.ses
