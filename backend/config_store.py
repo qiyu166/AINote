@@ -39,8 +39,10 @@ LOGGER = logging.getLogger(__name__)
 LLM_KEYS_FILE = "llm_keys.json"
 LLM_CONFIG_FILE = "llm_config.json"
 BILI_CREDENTIALS_FILE = "bili_credentials.json"
+DOUYIN_CREDENTIALS_FILE = "douyin_credentials.json"
 KEYS_SCHEMA_VERSION = 1
 BILI_SCHEMA_VERSION = 1
+DOUYIN_SCHEMA_VERSION = 1
 
 
 def _now() -> str:
@@ -53,6 +55,11 @@ class BiliCredentialsUnavailable(RuntimeError):
     与"从未保存过"必须区分：静默当成未登录会让任务改用匿名请求，
     失败原因漂到 412 风控上，用户完全看不出是凭据的问题。
     """
+
+
+class DouyinCredentialsUnavailable(RuntimeError):
+    """本机存过抖音凭据但解不开。与「从未保存过」同样必须区分，
+    否则抖音 detail 接口的 403 风控会被误报成「没登录」。"""
 
 
 class ConfigStore:
@@ -378,6 +385,70 @@ class ConfigStore:
             self._write(BILI_CREDENTIALS_FILE, sealed)
         LOGGER.info("旧版明文 B 站凭据已加密改写")
         return sealed
+
+    # ---- 抖音凭据 ----
+    #
+    # 抖音 cookie 字段比 B 站多且会变（ttwid / msToken / sessionid / Uifid ...），
+    # 因此不再逐字段入信封，而是把整份 cookie 字典序列化后整体加密：一份密文 +
+    # 一份非敏感的字段名清单（状态视图只看清单，不需要解密）。
+
+    def douyin_credentials_status(self) -> dict[str, Any]:
+        payload = self._read(DOUYIN_CREDENTIALS_FILE)
+        if not payload or not isinstance(payload.get("cookies"), dict):
+            return {"saved": False}
+        names = [str(name) for name in (payload.get("names") or [])]
+        return {
+            "saved": True,
+            "cookie_count": len(names),
+            "cookie_names": names,
+            "has_login": any(
+                name in names for name in ("sessionid", "sessionid_ss", "sid_guard")
+            ),
+            "updated_at": str(payload.get("updated_at") or ""),
+        }
+
+    def load_douyin_credentials(self) -> dict[str, str] | None:
+        payload = self._read(DOUYIN_CREDENTIALS_FILE)
+        if not payload or not isinstance(payload.get("cookies"), dict):
+            return None
+        try:
+            blob = secret_box.unprotect(
+                payload["cookies"], entropy_file=self._entropy_path()
+            )
+        except secret_box.SecretBoxError as error:
+            LOGGER.warning("本机抖音凭据解密失败（%s）：%s", error.code, error)
+            raise DouyinCredentialsUnavailable(
+                f"本机抖音凭据无法解密（{error.code}），可能来自其他机器或另一个账户。"
+                "请重新扫码登录导入，或再保存一次"
+            ) from error
+        try:
+            data = json.loads(blob)
+        except ValueError as error:
+            raise DouyinCredentialsUnavailable("本机抖音凭据内容已损坏，请重新保存") from error
+        if not isinstance(data, dict):
+            return None
+        return {str(key): str(value) for key, value in data.items() if value}
+
+    def save_douyin_credentials(self, cookies: dict[str, str]) -> None:
+        cleaned = {
+            str(key).strip(): str(value).strip()
+            for key, value in (cookies or {}).items()
+            if str(value).strip()
+        }
+        if not cleaned:
+            raise ValueError("抖音凭据为空，未保存到本机")
+        sealed = self._seal(json.dumps(cleaned, ensure_ascii=False, sort_keys=True))
+        payload = {
+            "version": DOUYIN_SCHEMA_VERSION,
+            "cookies": sealed,
+            "names": sorted(cleaned),
+            "updated_at": _now(),
+        }
+        with self._lock:
+            self._write(DOUYIN_CREDENTIALS_FILE, payload)
+
+    def clear_douyin_credentials(self) -> None:
+        self._clear(DOUYIN_CREDENTIALS_FILE)
 
 
 def _is_usable_entry(entry: Any) -> bool:

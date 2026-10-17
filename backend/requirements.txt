@@ -10,3 +10,5 @@ aiofiles>=24,<25
 av>=13,<17
 Pillow>=10,<13
 websockets>=13,<16
+# 抖音 a_bogus 签名（vendored 在 backend/douyin_sign/abogus.py）唯一需要的依赖
+gmssl>=3.2,<4

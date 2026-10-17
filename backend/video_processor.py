@@ -19,10 +19,33 @@ from urllib.parse import parse_qs, urlencode, urlparse, urljoin, urlunsplit
 
 import yt_dlp
 
+from . import douyin_browser, douyin_web
 from .transcript import TranscriptSegment, parse_subtitle_payload
 
 # 截图目录名会被写进笔记正文的相对引用（./frames/xxx.jpg），改它等于让历史笔记和导出包里的截图全部失效
 FRAMES_DIR_NAME = "frames"
+
+# 抖音 web 接口要带的 cookie 字段。Uifid 是设备指纹标识，缺了它 detail 接口会被
+# ArgusSecurityPlugin 以 403「Uifid Not Found」拦下（实测）；其余是会话/签名相关字段。
+DOUYIN_COOKIE_NAMES = (
+    "msToken",
+    "ttwid",
+    "odin_tt",
+    "Uifid",
+    "uifid",
+    "passport_csrf_token",
+    "passport_csrf_token_default",
+    "sid_guard",
+    "sessionid",
+    "sessionid_ss",
+    "s_v_web_id",
+    "__ac_nonce",
+    "__ac_signature",
+    "tt_scid",
+    "tt_chain_token",
+    "d_ticket",
+    "csrf_session_id",
+)
 
 
 class VideoSource(str, Enum):
@@ -1023,7 +1046,44 @@ class VideoProcessor:
     def _extract_douyin_share_info(
         self, url: str, cookie: dict[str, str] | None
     ) -> dict[str, Any]:
-        """尝试公开分享页解析；这是低成本探测器，失败由浏览器会话回退。"""
+        """抖音作品信息：三条通道依次尝试，全失败时把每条的原因都带出来。
+
+        1. **浏览器通道**（``douyin_browser``）——唯一实测能过的路：在真实浏览器
+           页面里用 JS fetch（不带签名）。根因是风控要的 ``Uifid`` 是前端 SDK
+           注入的请求头，Python 请求带不出来；
+        2. Python 直调（不带签名）——快速探测 / 将来接口放宽时的备用；
+        3. 旧的 iesdouyin 分享页解析——历史退路，实测该页已不再返回 ``_ROUTER_DATA``。
+        """
+        cookie_header = self._cookie_header(cookie, douyin=True)
+        aweme_id = douyin_web.extract_aweme_id(url)
+        errors: list[str] = []
+        if aweme_id:
+            try:
+                payload = douyin_browser.fetch_detail_payload(aweme_id, self.work_dir)
+                detail = payload.get("aweme_detail") if isinstance(payload, dict) else None
+                if isinstance(detail, dict):
+                    info = douyin_web.info_from_aweme_detail(detail)
+                    self._douyin_media_cache[url] = info
+                    return info
+                errors.append("浏览器通道未返回 aweme_detail")
+            except Exception as exc:
+                errors.append(f"浏览器通道失败（{exc}）")
+            try:
+                info = douyin_web.fetch_video_detail(aweme_id, cookie_header)
+                self._douyin_media_cache[url] = info
+                return info
+            except Exception as exc:
+                errors.append(f"接口直调失败（{exc}）")
+        try:
+            return self._extract_douyin_share_page(url, cookie_header)
+        except Exception as exc:
+            errors.append(f"分享页回退失败（{exc}）")
+        raise RuntimeError("抖音解析失败：" + "；".join(errors))
+
+    def _extract_douyin_share_page(
+        self, url: str, cookie_header: str
+    ) -> dict[str, Any]:
+        """旧的公开分享页解析（iesdouyin ``_ROUTER_DATA``）：detail 接口不可用时的退路。"""
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -1031,7 +1091,6 @@ class VideoProcessor:
             ),
             "Referer": "https://www.douyin.com/",
         }
-        cookie_header = self._cookie_header(cookie, douyin=True)
         if cookie_header:
             headers["Cookie"] = cookie_header
         try:
@@ -1260,14 +1319,9 @@ class VideoProcessor:
                 ("b_lsid", cookie.get("b_lsid")),
             )
         else:
-            # 仅允许浏览器登录管理器导出的 Douyin 会话字段，避免把任意
-            # 请求体键写入 cookiefile；值中的换行/制表符也不能穿透格式。
-            names = (
-                "msToken", "ttwid", "odin_tt", "passport_csrf_token",
-                "sid_guard", "sessionid", "sessionid_ss", "s_v_web_id",
-                "__ac_nonce", "__ac_signature", "tt_scid", "csrf_session_id",
-            )
-            mapping = tuple((name, cookie.get(name)) for name in names)
+            # 仅允许抖音会话白名单字段，避免把任意请求体键写入 cookiefile；
+            # 值中的换行/制表符也不能穿透格式。白名单见 DOUYIN_COOKIE_NAMES。
+            mapping = tuple((name, cookie.get(name)) for name in DOUYIN_COOKIE_NAMES)
         mapping = tuple(
             (name, str(value).replace("\t", "").replace("\r", "").replace("\n", ""))
             for name, value in mapping
@@ -1326,12 +1380,11 @@ class VideoProcessor:
         if not cookie:
             return ""
         if douyin:
-            names = (
-                "msToken", "ttwid", "odin_tt", "passport_csrf_token", "sid_guard",
-                "sessionid", "sessionid_ss", "s_v_web_id", "__ac_nonce",
-                "__ac_signature", "tt_scid", "csrf_session_id",
+            return "; ".join(
+                f"{name}={cookie[name]}"
+                for name in DOUYIN_COOKIE_NAMES
+                if cookie.get(name)
             )
-            return "; ".join(f"{name}={cookie[name]}" for name in names if cookie.get(name))
         names = {
             "sessdata": "SESSDATA",
             "bili_jct": "bili_jct",

@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import launcher
 from backend import bili_login, main
 from backend.config_store import BILI_CREDENTIALS_FILE, ConfigStore
-from backend.llm_summarizer import LLMSummarizer, utf8_safe
+from backend.llm_summarizer import LLMSummarizer, TailCoverage, TailPatchOutcome, utf8_safe
 from backend.transcript import TranscriptSegment
 from backend.video_processor import (
     BiliPage,
@@ -348,12 +348,13 @@ def test_linkify_timestamps_links_sections_to_playback_position() -> None:
     assert "trackid" not in out and "vd_source" not in out
 
 
-def test_linkify_timestamps_keeps_brackets_and_stays_idempotent() -> None:
+def test_linkify_timestamps_uses_one_bracket_pair_and_stays_idempotent() -> None:
     url = "https://www.bilibili.com/video/BV1xx411c7mD"
     out = main.linkify_timestamps("## 段 [00:00-00:11]\n", url)
-    # 方括号必须留住：Markdown 的 [文字](链接) 会把方括号当语法吃掉，而前端「萌芽」
-    # 按 [MM:SS-MM:SS] 结尾剥离标题，靠的就是它。
-    assert "[[00:00-00:11]](https://www.bilibili.com/video/BV1xx411c7mD?t=0)" in out
+    # 只能有一层方括号：写成 [[MM:SS]](url) 时 Obsidian 会把 [[...]] 当双链语法吃掉，
+    # 外层链接失效、网址裸露成一大串，而网页端（marked）反而看不出问题。
+    assert "[00:00-00:11](https://www.bilibili.com/video/BV1xx411c7mD?t=0)" in out
+    assert "[[" not in out
     assert main.linkify_timestamps(out, url) == out
 
 
@@ -381,6 +382,158 @@ def test_linkify_timestamps_keeps_footnotes() -> None:
     once = main.linkify_timestamps("## 段 [00:46]\n\n脚注[^1]\n", url)
     assert once.count("](http") == 1
     assert "[^1]" in once
+
+
+FOOTER = "---\n来源：https://www.bilibili.com/video/BV1xx411c7mD\n生成模型：deepseek · m\n笔记风格：详细笔记 + 点评分析\n"
+
+
+def test_insert_tail_patch_goes_before_the_footer() -> None:
+    draft = f"# 标题\n\n[00:01-04:00] 正文\n\n{FOOTER}"
+    out = main.insert_tail_patch(draft, "[05:00-06:00] 补写内容", "05:00")
+    assert "### 补遗（05:00 之后）" in out
+    # 补遗排在“来源／生成模型”之前，别读成页脚的附注
+    assert out.index("### 补遗") < out.index("来源：")
+    assert out.rstrip().endswith("笔记风格：详细笔记 + 点评分析")
+    assert "正文" in out
+
+
+def test_insert_tail_patch_appends_when_footer_is_missing() -> None:
+    out = main.insert_tail_patch("# 标题\n\n正文", "补写内容", "05:00")
+    assert out.rstrip().endswith("补写内容")
+    assert "### 补遗（05:00 之后）" in out
+
+
+def test_patch_tail_endpoint_updates_note_and_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """补写要同时落到任务目录和已归档的那一份——归档必须原地覆盖，不能新增 -2 文件。"""
+
+    class FakeSummarizer:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def resolve_note_effort(self, reasoning_effort: str, style: str) -> str:
+            return "off"
+
+        def tail_coverage(self, draft: str, segments: object, **kwargs: object):
+            covered = "补遗" in draft
+            return TailCoverage(
+                note_end=591.0 if covered else 300.0,
+                coverage_end=591.0,
+                gap_seconds=0.0 if covered else 291.0,
+                missing_segments=0 if covered else 1,
+                missing_characters=0 if covered else 20,
+                material_segments=0 if covered else 1,
+                material_characters=0 if covered else 20,
+                patch_max_tokens=1600,
+                patch_available=not covered,
+                patch_blocked_reason=None,
+            )
+
+        async def patch_missing_tail(self, title, draft, segments, *, effort, **kwargs):
+            body = "[05:00-09:51] 补写的结尾"
+            return TailPatchOutcome(
+                text=f"{draft}\n\n{body}", body=body, missing_start="05:00"
+            )
+
+    task_id = "patch-tail-task"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    archived = vault / "笔记.md"
+    archived.write_text(f"# 笔记\n\n[00:01-04:00] 正文\n\n{FOOTER}", encoding="utf-8")
+    (task_dir / "notes.md").write_text(
+        f"# 笔记\n\n[00:01-04:00] 正文\n\n{FOOTER}", encoding="utf-8"
+    )
+    (task_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 0, "end": 300, "text": "前半部分"},
+                    {"start": 300, "end": 591, "text": "结尾的题目讲解"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (task_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "title": "笔记",
+                "summary_style": "detailed",
+                "reasoning_effort": "auto",
+                "source_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                "runtime": {"result": {"archived_path": str(archived)}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(main, "LLMSummarizer", FakeSummarizer)
+    main.tasks.pop(task_id, None)
+    try:
+        client = TestClient(main.app)
+        response = client.post(
+            f"/api/task/{task_id}/patch-tail",
+            json={"llm_config": {"model_type": "deepseek", "api_key": "test-key"}},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ok"] is True
+        assert data["archived_overwritten"] is True
+        assert "补遗" in data["markdown"]
+        assert "### 补遗（05:00 之后）" in (task_dir / "notes.md").read_text(encoding="utf-8")
+        archived_text = archived.read_text(encoding="utf-8")
+        assert "### 补遗（05:00 之后）" in archived_text
+        # 补写片段时间戳也已链接化，且没有生成第二份归档文件
+        assert "05:00-09:51](https://www.bilibili.com/video/BV1xx411c7mD?t=300)" in archived_text
+        assert not (vault / "笔记-2.md").exists()
+        # 落盘的任务记录带上新的覆盖度，刷新页面不会再提示缺口
+        manifest = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        assert manifest["runtime"]["result"]["coverage"]["gap_seconds"] == 0.0
+    finally:
+        main.tasks.pop(task_id, None)
+
+
+def test_task_coverage_endpoint_computes_for_legacy_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """改动之前生成的任务结果里没有 coverage 字段，界面靠这个接口现算。
+
+    现算必须是不联网的纯计算，否则老笔记就永远看不到缺口提示了。
+    """
+    task_id = "legacy-coverage-task"
+    task_dir = tmp_path / task_id
+    task_dir.mkdir()
+    (task_dir / "notes.md").write_text(
+        "# 笔记\n\n[00:01-04:00] 正文\n", encoding="utf-8"
+    )
+    (task_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 0, "end": 300, "text": "前半部分"},
+                    {"start": 300, "end": 591, "text": "结尾的题目讲解"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "WORKSPACE_DIR", tmp_path)
+
+    client = TestClient(main.app)
+    data = client.get(f"/api/task/{task_id}/coverage").json()
+    assert data["coverage"]["note_end"] == "04:00"
+    assert data["coverage"]["coverage_end"] == "09:51"
+    assert data["coverage"]["patch_available"] is True
+    # 没有产物时给 null，不把接口弄成错误态
+    assert client.get("/api/task/no-such-task/coverage").json() == {"coverage": None}
 
 
 def test_seek_url_handles_platforms_and_pages() -> None:
@@ -764,16 +917,49 @@ def test_llm_stage_error_never_becomes_platform_text() -> None:
 def test_platform_403_maps_to_the_platform_of_the_task() -> None:
     raw = "ERROR: Unable to download webpage: HTTP Error 403: Forbidden"
     assert "抖音" in main.friendly_task_error(
-        raw, source=main.VideoSource.DOUYIN, step_name="下载媒体"
+        raw, source=main.VideoSource.DOUYIN, step_name="准备音频"
     )
     bilibili = main.friendly_task_error(
-        raw, source=main.VideoSource.BILIBILI, step_name="下载媒体"
+        raw, source=main.VideoSource.BILIBILI, step_name="准备音频"
     )
     assert "B 站" in bilibili and "抖音" not in bilibili
     assert (
-        main.friendly_task_error(raw, source=main.VideoSource.LOCAL, step_name="下载媒体")
+        main.friendly_task_error(raw, source=main.VideoSource.LOCAL, step_name="准备音频")
         == raw
     )
+
+
+def test_douyin_hint_never_masks_later_stage_failures() -> None:
+    """回归：抖音任务在「语音转写」「生成笔记」阶段失败时，曾被套上
+    「抖音链接解析失败，请扫码登录后重投」——用户于是去重投一条本来没问题的链接，
+    而真正失败的是 Groq 转写。抖音提示只允许出现在取信息/准备音频两步。"""
+    raw = "ReadError（该异常未附带文本消息）"
+    assert (
+        main.friendly_task_error(raw, source=main.VideoSource.DOUYIN, step_name="语音转写")
+        == raw
+    )
+    assert (
+        main.friendly_task_error(raw, source=main.VideoSource.DOUYIN, step_name="生成笔记")
+        != main.DOUYIN_HINT
+    )
+    # 而取信息这一步仍然要给可执行的抖音路径
+    assert (
+        main.friendly_task_error(raw, source=main.VideoSource.DOUYIN, step_name="读取视频信息")
+        == main.DOUYIN_HINT
+    )
+
+
+def test_raw_error_text_never_returns_blank() -> None:
+    """httpx 的 ReadError / TimeoutException 的 str() 是空串，会让日志里出现
+    「底层错误：」后面什么都没有——必须退回异常类型名。"""
+
+    class _BlankReadError(Exception):
+        def __str__(self) -> str:  # pragma: no cover - 只为复现空消息
+            return ""
+
+    assert main.raw_error_text(RuntimeError("boom")) == "boom"
+    assert main.raw_error_text(RuntimeError("   ")) == "RuntimeError（该异常未附带文本消息）"
+    assert "ReadError" in main.raw_error_text(_BlankReadError())
 
 
 def test_context_limit_error_says_which_window_to_widen() -> None:
@@ -1594,7 +1780,7 @@ async def test_pipeline_uses_platform_subtitles_without_downloading_audio(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None, should_abort=None,
+            progress_callback=None, should_abort=None, content_type="general",
         ):
             if progress_callback:
                 await progress_callback(78, "正在生成完整笔记")
@@ -1668,7 +1854,7 @@ async def test_pipeline_reuses_transcript_without_platform_or_whisper_calls(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None, should_abort=None,
+            progress_callback=None, should_abort=None, content_type="general",
         ):
             assert title == "旧任务标题"
             assert style == "detailed"
@@ -1878,7 +2064,7 @@ async def test_pipeline_merges_all_bilibili_pages_from_ai_subtitles(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None, should_abort=None,
+            progress_callback=None, should_abort=None, content_type="general",
         ):
             if progress_callback:
                 await progress_callback(78, "正在生成完整笔记")
@@ -1969,7 +2155,7 @@ async def test_pipeline_transcribes_missing_bilibili_page_and_merges(
 
         async def generate_summary(
             self, title, segments, metadata, style="detailed", reasoning_effort="auto",
-            progress_callback=None, should_abort=None,
+            progress_callback=None, should_abort=None, content_type="general",
         ):
             captured_segments.extend(segments)
             if progress_callback:
@@ -3208,3 +3394,136 @@ def test_previous_bili_pages_returns_latest_explicit_selection(
         encoding="utf-8",
     )
     assert main.previous_bili_pages("https://www.bilibili.com/video/BV1ab") is None
+
+
+def test_footer_labels_keypoints_and_content_scene() -> None:
+    assert main.summary_style_label("keypoints") == "要点提炼"
+    assert main.content_type_label("tutorial") == "教程"
+    footer = main.append_note_footer(
+        "# 视频要点", "https://example.com/v", "deepseek", "m", "keypoints", "tutorial"
+    )
+    assert "笔记风格：要点提炼" in footer
+    assert "内容场景：教程" in footer
+    # general 不输出场景行：老任务页脚形状不变
+    general = main.append_note_footer("# 笔记", None, "deepseek", "m", "detailed")
+    assert "内容场景" not in general
+    assert "来源：本地文件（未提供视频链接）" in general
+
+
+def test_note_footer_regex_tolerates_scene_line() -> None:
+    """补写结尾靠这个正则定位页脚；多出的场景行不能让它失效。"""
+    draft = "# 笔记\n\n正文\n\n" + main.append_note_footer(
+        "x", "https://example.com/v", "deepseek", "m", "keypoints", "learning"
+    )
+    assert main._NOTE_FOOTER_RE.search(draft)
+    patched = main.insert_tail_patch(draft, "补的内容", "10:00")
+    assert patched.index("补遗") < patched.index("---\n来源：")
+
+
+def test_summarize_request_accepts_keypoints_and_content_type() -> None:
+    request = main.SummarizeRequest(
+        video_url="https://example.com/v",
+        summary_style="keypoints",
+        content_type="tutorial",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="k"),
+    )
+    assert request.summary_style == "keypoints"
+    assert request.content_type == "tutorial"
+    # 缺省 = 历史行为（detailed + general）
+    default = main.SummarizeRequest(
+        video_url="https://example.com/v",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="k"),
+    )
+    assert default.summary_style == "detailed"
+    assert default.content_type == "general"
+
+
+def test_douyin_credentials_endpoints_roundtrip(tmp_path, monkeypatch) -> None:
+    """抖音凭据：保存只回布尔、状态只回字段名、清除后归零。"""
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    client = TestClient(main.app)
+
+    assert client.get("/api/douyin-credentials").json() == {"saved": False}
+    saved = client.post(
+        "/api/douyin-credentials",
+        json={"cookies": {"sessionid": "s-1", "Uifid": "u-1", "ttwid": "t-1"}},
+    )
+    assert saved.status_code == 200 and saved.json() == {"saved": True}
+
+    status = client.get("/api/douyin-credentials").json()
+    assert status["saved"] is True
+    assert status["has_login"] is True
+    assert sorted(status["cookie_names"]) == ["Uifid", "sessionid", "ttwid"]
+    # 状态视图绝不能回 cookie 值
+    assert "s-1" not in json.dumps(status)
+
+    assert client.delete("/api/douyin-credentials").json() == {"saved": False}
+    assert client.get("/api/douyin-credentials").json() == {"saved": False}
+
+
+def test_douyin_credentials_endpoint_rejects_empty(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "config_store", ConfigStore(tmp_path))
+    client = TestClient(main.app)
+    response = client.post("/api/douyin-credentials", json={"cookies": {}})
+    assert response.status_code == 400
+
+
+def test_douyin_login_endpoints_delegate_to_manager(monkeypatch) -> None:
+    calls: dict[str, bool] = {}
+
+    async def fake_start() -> dict:
+        calls["start"] = True
+        return {"ok": True, "state": "waiting"}
+
+    async def fake_status() -> dict:
+        calls["status"] = True
+        return {"ok": True, "state": "waiting"}
+
+    async def fake_cancel() -> dict:
+        calls["cancel"] = True
+        return {"ok": True}
+
+    monkeypatch.setattr(main.douyin_login_manager, "start", fake_start)
+    monkeypatch.setattr(main.douyin_login_manager, "status", fake_status)
+    monkeypatch.setattr(main.douyin_login_manager, "cancel", fake_cancel)
+    client = TestClient(main.app)
+
+    assert client.post("/api/douyin-login/start").json()["state"] == "waiting"
+    assert client.get("/api/douyin-login/status").json()["ok"] is True
+    assert client.post("/api/douyin-login/cancel").json()["ok"] is True
+    assert calls == {"start": True, "status": True, "cancel": True}
+
+
+def test_summarize_request_accepts_douyin_cookie_field() -> None:
+    request = main.SummarizeRequest(
+        video_url="https://www.douyin.com/video/7300000000000000000",
+        douyin_cookie={"sessionid": "s-1", "Uifid": "u-1"},
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="k"),
+    )
+    assert request.douyin_cookie == {"sessionid": "s-1", "Uifid": "u-1"}
+    default = main.SummarizeRequest(
+        video_url="https://www.douyin.com/video/7300000000000000000",
+        llm_config=main.LLMConfig(model_type="deepseek", api_key="k"),
+    )
+    assert default.douyin_cookie is None
+
+
+def test_groq_transport_error_text_is_never_blank() -> None:
+    """httpx 在服务端提前拒绝大分片上传时会抛**消息为空**的 ReadError（实测），
+    把原本清楚的 400/401 吞掉。文案必须自己补上类型名与可执行提示。"""
+    import httpx
+
+    from backend import groq_asr
+
+    blank_read = httpx.ReadError("")
+    assert str(blank_read) == ""  # 复现：httpx 的空消息
+    text = groq_asr._explain_transport_error(blank_read)
+    assert text.strip(), "文案不能是空白"
+    assert "ReadError" in text
+    assert "中断" in text
+
+    for exc in (httpx.WriteError(""), httpx.ConnectTimeout(""), httpx.ReadTimeout("")):
+        rendered = groq_asr._explain_transport_error(exc)
+        assert rendered.strip() and type(exc).__name__ in rendered
+
+    assert groq_asr._explain_transport_error(None).strip()

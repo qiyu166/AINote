@@ -8,7 +8,10 @@
     python video_note.py "<视频链接或本地文件路径>" [选项]
 
 常用选项:
-    --style {detailed,faithful,concise}   笔记风格（默认 detailed）
+    --style {detailed,faithful,concise,keypoints}
+                                          笔记风格（默认 detailed；keypoints 只列核心观点与结论清单）
+    --content-type {general,tutorial,knowledge,learning}
+                                          内容场景，按内容类型组织结构（默认 general）
     --transcript-only                     只做到带时间轴转录，不调用大模型（无需 API Key）
     --no-reuse                            禁止复用同链接已有转录，强制重新转写
     --provider {deepseek,openai,qwen,glm,moonshot,custom}
@@ -226,7 +229,21 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="VideoToNo：视频 → 带时间轴的 Markdown 笔记")
     parser.add_argument("source", help="视频链接（B站/抖音/YouTube）或本地媒体文件路径")
-    parser.add_argument("--style", choices=["detailed", "faithful", "concise"], default="detailed")
+    parser.add_argument(
+        "--style",
+        choices=["detailed", "faithful", "concise", "keypoints"],
+        default="detailed",
+        help=(
+            "笔记风格：detailed 详细+点评（默认）/ faithful 详细复原 / concise 精简摘要 / "
+            "keypoints 要点提炼（只列核心观点与结论清单）"
+        ),
+    )
+    parser.add_argument(
+        "--content-type",
+        choices=["general", "tutorial", "knowledge", "learning"],
+        default="general",
+        help="内容场景：按内容类型组织结构（教程给步骤 / 知识给概念与边界 / 学习给重点与自测），默认通用",
+    )
     parser.add_argument(
         "--transcript-only",
         action="store_true",
@@ -302,6 +319,7 @@ def main() -> None:
             llm_config = pick_saved_channel(base) or {"model_type": "deepseek"}
         payload = {
             "summary_style": args.style,
+            "content_type": args.content_type,
             "prefer_subtitles": True,
             "processing_mode": "restart",
             "whisper_model": args.whisper_model,

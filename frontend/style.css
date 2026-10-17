@@ -677,6 +677,13 @@ input[type="checkbox"] {
 .result-actions select { width: auto; min-width: 170px; }
 .output-notice { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin: -4px 0 14px; color: var(--text-muted); font-size: 12px; }
 .output-notice code { min-width: 0; overflow-wrap: anywhere; color: var(--green); }
+.coverage-notice { display: flex; flex-direction: column; gap: 6px; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid #d9a441; background: var(--surface-deep); font-size: 13px; line-height: 1.7; }
+.coverage-title { color: var(--text); font-weight: 600; }
+.coverage-body { color: var(--text-soft); }
+.coverage-body b { color: var(--text); }
+.coverage-cost { color: var(--text-muted); font-size: 12px; }
+.coverage-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.coverage-status { color: var(--text-muted); font-size: 12px; }
 .markdown-body { min-width: 0; max-width: 100%; padding: clamp(18px, 3vw, 34px); overflow-x: auto; border: 1px solid var(--border); background: var(--surface-deep); color: var(--text-soft); font-size: 14px; line-height: 1.75; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }

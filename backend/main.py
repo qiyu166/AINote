@@ -51,9 +51,16 @@ from pydantic import BaseModel, Field, SecretStr
 from . import paraformer_asr, secret_box
 from . import asr_process
 from . import groq_asr
-from .config_store import BiliCredentialsUnavailable, LLM_KEYS_FILE, ConfigStore
+from .config_store import (
+    BiliCredentialsUnavailable,
+    DouyinCredentialsUnavailable,
+    LLM_KEYS_FILE,
+    ConfigStore,
+)
 from .llm_summarizer import (
     LONG_TRANSCRIPT_CHARACTERS,
+    TAIL_GAP_SECONDS,
+    TAIL_PATCH_MAX_INPUT_CHARACTERS_MANUAL,
     LLMSummarizer,
     default_base_url,
     env_proxy_summary,
@@ -62,6 +69,7 @@ from .llm_summarizer import (
     utf8_safe,
 )
 from .bili_login import BiliLoginManager
+from .douyin_login import DouyinLoginManager
 from .transcript import (
     TranscriptSegment,
     format_timestamp,
@@ -128,9 +136,13 @@ WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3", "turbo", "belle
 # 本地 faster-whisper 的缓存清单展示，混进去会出现「点下载却没有对应本地模型」。
 ASR_MODELS = WHISPER_MODELS | {"paraformer-zh"} | set(groq_asr.GROQ_ASR_MODELS)
 DOUYIN_HINT = (
-    "抖音链接解析失败。本程序的抖音抓取已停用（该平台风控需浏览器上下文，"
-    "维护成本高于收益），建议把视频保存到本地后用「上传本地视频」。"
+    "抖音链接解析失败。程序会在本机浏览器里打开作品页再取数据（抖音风控要求"
+    "浏览器上下文），公开作品无需登录；若作品仅登录可见，请在「抖音访问凭据」里"
+    "扫码登录后重试；也可以把视频保存到本地后用「上传本地视频」。"
 )
+# 只有这两步的失败才该套上面那句「抖音解析失败」；其余步骤（转写、生成笔记…）
+# 与抖音无关，一律透传原错误，免得用户去重投一条本来没问题的链接。
+DOUYIN_HINT_STEPS = frozenset({"读取视频信息", "准备音频"})
 NOTE_STEP_NAME = "生成笔记"
 API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
 # 网关报错常把整个请求头或 JSON 回显出来；只认 sk- 前缀会漏掉 Bearer 与非 sk- 格式的凭据。
@@ -421,6 +433,7 @@ def transcribe_progress_reporter(
 
 
 bili_login_manager = BiliLoginManager(WORKSPACE_DIR)
+douyin_login_manager = DouyinLoginManager(WORKSPACE_DIR)
 config_store = ConfigStore(WORKSPACE_DIR)
 tasks: dict[str, dict[str, Any]] = {}
 running_jobs: dict[str, asyncio.Task[None]] = {}
@@ -470,6 +483,12 @@ class BiliCredentialsPayload(BaseModel):
     buvid3: str = ""
 
 
+class DouyinCredentialsPayload(BaseModel):
+    """手动粘贴的抖音 cookie（名称→值）。字段随平台变化，不逐字段建模。"""
+
+    cookies: dict[str, str] = {}
+
+
 class LLMConfig(BaseModel):
     model_type: str = "deepseek"
     api_key: SecretStr = SecretStr("")
@@ -512,7 +531,9 @@ class SummarizeRequest(BaseModel):
     processing_mode: Literal["reuse", "restart"] = "reuse"
     # transcript：只做「视频 → 带时间轴转录」，不调用大模型，产物到 transcript.json 为止
     output: Literal["note", "transcript"] = "note"
-    summary_style: Literal["detailed", "faithful", "concise"] = "detailed"
+    summary_style: Literal["detailed", "faithful", "concise", "keypoints"] = "detailed"
+    # 内容场景：决定笔记按什么结构组织（教程/知识/学习），与风格正交；general = 历史行为
+    content_type: Literal["general", "tutorial", "knowledge", "learning"] = "general"
     reasoning_effort: Literal["auto", "off", "high", "max"] = "auto"
     prefer_subtitles: bool = True
     include_screenshots: bool = False
@@ -522,6 +543,8 @@ class SummarizeRequest(BaseModel):
     # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
     bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
+    # 抖音会话 cookie（名称→值）：ttwid/msToken/sessionid/Uifid ... 整份透传
+    douyin_cookie: dict[str, str] | None = None
     llm_config: LLMConfig
 
 
@@ -538,6 +561,8 @@ class TranscribeRequest(BaseModel):
     # B 站分 P 显式选择（页码从 1 起）；None/空 = 按 URL ?p=N 规则（缺省全部）
     bilibili_pages: list[int] | None = None
     bilibili_cookie: BilibiliCookie | None = None
+    # 抖音会话 cookie（名称→值）：ttwid/msToken/sessionid/Uifid ... 整份透传
+    douyin_cookie: dict[str, str] | None = None
 
 
 class BiliPagesRequest(BaseModel):
@@ -545,6 +570,18 @@ class BiliPagesRequest(BaseModel):
 
     video_url: str
     bilibili_cookie: BilibiliCookie | None = None
+
+
+class PatchTailRequest(BaseModel):
+    """`POST /api/task/{id}/patch-tail` 的请求体：补写笔记缺失的结尾。
+
+    不重跑整篇，只补缺口，因此只需要模型配置：风格、标题、来源、转录一律从任务
+    记录里取，避免前端把当时的设置再抄一遍（抄错就补出风格不一致的段落）。
+    推理档位默认沿用任务记录，允许显式覆盖——补写是"接着写一段"，通常关掉思考更快。
+    """
+
+    llm_config: LLMConfig
+    reasoning_effort: Literal["auto", "off", "high", "max"] | None = None
 
 
 def new_task(status: str = "pending", task_id: str | None = None) -> dict[str, Any]:
@@ -835,6 +872,7 @@ def write_task_manifest(
         # origin=agent 的纯转录任务不进网页端历史（见 list_recent_tasks）
         "origin": origin,
         "summary_style": request.summary_style,
+        "content_type": getattr(request, "content_type", "general") or "general",
         "reasoning_effort": request.reasoning_effort,
         "reused_task_id": reused_task_id,
         # 分 P 勾选随任务落盘：同一视频重新处理时，/bili-pages 用它预勾上次的范围
@@ -1492,6 +1530,29 @@ async def clear_bili_credentials() -> dict[str, bool]:
     return {"saved": False}
 
 
+@app.get("/api/douyin-credentials")
+async def get_douyin_credentials() -> dict[str, Any]:
+    """抖音凭据状态：只报字段名与数量，不返回 cookie 值。"""
+    return config_store.douyin_credentials_status()
+
+
+@app.post("/api/douyin-credentials")
+async def save_douyin_credentials(payload: DouyinCredentialsPayload) -> dict[str, Any]:
+    try:
+        config_store.save_douyin_credentials(payload.cookies)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except secret_box.SecretBoxError as error:
+        raise HTTPException(status_code=500, detail=f"本机加密保存失败：{error}") from error
+    return {"saved": True}
+
+
+@app.delete("/api/douyin-credentials")
+async def clear_douyin_credentials() -> dict[str, bool]:
+    config_store.clear_douyin_credentials()
+    return {"saved": False}
+
+
 def previous_bili_pages(normalized_url: str) -> list[int] | None:
     """该视频最近一次任务显式勾选的分 P（新任务在前扫描，没有则 None）。
 
@@ -1800,6 +1861,21 @@ async def bili_login_cancel() -> dict[str, Any]:
     return await bili_login_manager.cancel()
 
 
+@app.post("/api/douyin-login/start")
+async def douyin_login_start() -> dict[str, Any]:
+    return await douyin_login_manager.start()
+
+
+@app.get("/api/douyin-login/status")
+async def douyin_login_status() -> dict[str, Any]:
+    return await douyin_login_manager.status()
+
+
+@app.post("/api/douyin-login/cancel")
+async def douyin_login_cancel() -> dict[str, Any]:
+    return await douyin_login_manager.cancel()
+
+
 # 视频容器后缀（可能带音轨、需要时提取）；纯音频后缀直接使用
 VIDEO_CONTAINER_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
 
@@ -1989,6 +2065,161 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/api/task/{task_id}/coverage")
+async def task_coverage(task_id: str) -> dict[str, Any]:
+    """按需算一份笔记覆盖度。
+
+    覆盖度是纯计算、不联网，所以这里不需要模型配置：改动之前生成的老任务结果里
+    没有这个字段，换机器/换模型的旧任务也照样能看出“笔记缺了结尾”。
+    """
+    try:
+        directory = task_directory(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="非法任务 ID") from exc
+    notes_path = directory / "notes.md"
+    transcript = load_transcript_result(directory)
+    if not notes_path.is_file() or not transcript:
+        return {"coverage": None}
+    try:
+        draft = notes_path.read_text(encoding="utf-8")
+    except OSError:
+        return {"coverage": None}
+    coverage = LLMSummarizer.tail_coverage(
+        draft,
+        transcript["segments"],
+        material_budget=TAIL_PATCH_MAX_INPUT_CHARACTERS_MANUAL,
+    )
+    return {"coverage": coverage.to_dict() if coverage is not None else None}
+
+
+@app.post("/api/task/{task_id}/patch-tail")
+async def patch_task_tail(task_id: str, request: PatchTailRequest) -> dict[str, Any]:
+    """补写笔记缺失的结尾：只补缺口，不重跑整篇。
+
+    要不要补由用户决定（覆盖度随任务结果推给前端，代价一并摆出来），这一端点只在
+    用户按下按钮时执行。成功时同时更新任务目录的 notes.md 与已归档的那一份——归档走
+    原地覆盖，因为 ``archive_note()`` 遇重名会加序号，复用它只会凭空多出一份重复笔记。
+    """
+    try:
+        directory = task_directory(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="非法任务 ID") from exc
+    notes_path = directory / "notes.md"
+    if not notes_path.is_file():
+        raise HTTPException(status_code=409, detail="该任务没有笔记产物，无法补写")
+    transcript = load_transcript_result(directory)
+    if not transcript:
+        raise HTTPException(status_code=409, detail="该任务没有转录产物，无法核对笔记缺口")
+    manifest = read_task_manifest(task_id)
+    try:
+        draft = notes_path.read_text(encoding="utf-8")
+    except OSError:
+        raise HTTPException(status_code=500, detail="笔记文件无法读取") from None
+
+    config = request.llm_config
+    base_url = config.base_url or config.custom_base_url
+    model = config.model or config.custom_model_name
+    try:
+        api_key, _ = resolve_llm_credentials(
+            model_type=config.model_type,
+            base_url=base_url,
+            api_key=config.api_key.get_secret_value(),
+        )
+        summarizer = LLMSummarizer(
+            model_type=config.model_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    style = str(manifest.get("summary_style") or "detailed")
+    selected_effort = request.reasoning_effort or str(
+        manifest.get("reasoning_effort") or "auto"
+    )
+    coverage = summarizer.tail_coverage(
+        draft,
+        transcript["segments"],
+        material_budget=TAIL_PATCH_MAX_INPUT_CHARACTERS_MANUAL,
+    )
+    if coverage is None:
+        raise HTTPException(status_code=409, detail="笔记里没有可识别的时间戳，无法定位缺口")
+    if not coverage.patch_available:
+        raise HTTPException(
+            status_code=409,
+            detail=coverage.patch_blocked_reason or "这篇笔记没有需要补写的缺口",
+        )
+
+    outcome = await summarizer.patch_missing_tail(
+        str(manifest.get("title") or ""),
+        draft,
+        transcript["segments"],
+        effort=summarizer.resolve_note_effort(selected_effort, style),
+        material_budget=TAIL_PATCH_MAX_INPUT_CHARACTERS_MANUAL,
+    )
+    if not outcome.ok:
+        raise HTTPException(status_code=502, detail=f"补写失败：{outcome.error}")
+
+    body = outcome.body or ""
+    # 补写片段里的时间点也要能点；只处理新写的这一段，不动既有正文。多分 P 笔记
+    # 与生成流程保持一致，保持纯文本（单条链接定位不到正确分 P）。
+    pages = manifest.get("bilibili_pages") or []
+    source_url = manifest.get("normalized_source_url") or manifest.get("source_url")
+    if source_url and len(pages) <= 1:
+        body = linkify_timestamps(body, str(source_url))
+
+    patched = insert_tail_patch(draft, body, outcome.missing_start)
+    write_text_atomically(notes_path, patched)
+
+    runtime_result = (manifest.get("runtime") or {}).get("result") or {}
+    archived_raw = str(runtime_result.get("archived_path") or "")
+    overwritten = False
+    if archived_raw:
+        try:
+            archived_file = Path(archived_raw)
+            if archived_file.is_file():
+                # 归档那份的截图引用与任务目录不同（../<task_id>/ 或 <笔记名>.assets/），
+                # 必须在它自己的正文上拼接，不能拿任务目录的正文覆盖过去。
+                archived_text = archived_file.read_text(encoding="utf-8")
+                write_text_atomically(
+                    archived_file,
+                    insert_tail_patch(archived_text, body, outcome.missing_start),
+                )
+                overwritten = True
+        except OSError:
+            overwritten = False
+
+    new_coverage = summarizer.tail_coverage(
+        patched,
+        transcript["segments"],
+        material_budget=TAIL_PATCH_MAX_INPUT_CHARACTERS_MANUAL,
+    )
+    remaining = ""
+    if new_coverage is not None and new_coverage.gap_seconds > TAIL_GAP_SECONDS:
+        remaining = f"；仍缺约 {new_coverage.gap_seconds / 60:.1f} 分钟"
+    log_line = redact_secrets(
+        f"已补写结尾（{outcome.missing_start} 之后）"
+        + ("，任务目录与归档文件均已更新" if overwritten else "，已更新任务目录")
+        + remaining,
+        api_key,
+    )
+    record_patch_result(
+        task_id,
+        patched,
+        new_coverage.to_dict() if new_coverage is not None else None,
+        log_line,
+    )
+    return {
+        "ok": True,
+        "markdown": patched,
+        "coverage": new_coverage.to_dict() if new_coverage is not None else None,
+        "archived_path": archived_raw or None,
+        "archived_overwritten": overwritten,
+        "log": log_line,
+    }
+
+
 @app.delete("/api/task/{task_id}")
 async def delete_task(task_id: str) -> dict[str, bool]:
     if task_id not in tasks:
@@ -2083,8 +2314,19 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         source_kind = (
             video_processor.detect_source(source_url) if source_url else VideoSource.LOCAL
         )
-        # 抖音抓取已停用，平台字幕凭据只剩 B 站一条路
-        cookie = bili_cookie
+        # 平台凭据按来源分流：抖音走自己的会话 cookie（B 站凭据对它没用，反之亦然）
+        if source_kind == VideoSource.DOUYIN:
+            try:
+                cookie = (
+                    request.douyin_cookie
+                    if request.douyin_cookie
+                    else config_store.load_douyin_credentials()
+                )
+            except DouyinCredentialsUnavailable as error:
+                fallback_notes.append(str(error))
+                cookie = None
+        else:
+            cookie = bili_cookie
         transcript_result = load_transcript_result(resume_dir) if resume_dir else None
         bili_pages_to_transcribe: list = []
 
@@ -2438,7 +2680,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         advisory = ""
         if (
             transcript_characters > LONG_TRANSCRIPT_CHARACTERS
-            and request.summary_style != "concise"
+            and request.summary_style not in {"concise", "keypoints"}
         ):
             advisory = (
                 "这段内容很长，笔记会按时间顺序逐段完整记录（不做预先压缩），"
@@ -2497,6 +2739,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             },
             style=request.summary_style,
             reasoning_effort=request.reasoning_effort,
+            content_type=request.content_type,
             progress_callback=report_llm_progress,
             should_abort=should_abort,
         )
@@ -2518,6 +2761,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             config.model_type,
             model,
             request.summary_style,
+            request.content_type,
         )
         # 多分 P 合并后的时间轴按选中分 P 顺序累积，单条链接定位不到正确分 P，
         # 此时保持纯文本。同时看两个信号：旧版 manifest 可能缺 bili_total_pages。
@@ -2549,6 +2793,13 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
             "output_directory": str(task_dir),
             "archived_path": str(archived_path) if archived_path else None,
             "processing_seconds": elapsed,
+            # 覆盖度核对结果：前端据此提示“笔记没写到结尾”，并把补写的代价摆给用户看，
+            # 由用户决定补不补（详见 POST /api/task/{id}/patch-tail）
+            "coverage": (
+                summarizer.coverage.to_dict()
+                if getattr(summarizer, "coverage", None) is not None
+                else None
+            ),
         }
         task.update(
             status="completed", step=7, step_name="完成", progress=100, error=None
@@ -2564,7 +2815,7 @@ async def process_video_task(task_id: str, request: SummarizeRequest) -> None:
         persist_task_runtime(task_id)
     except Exception as exc:
         finish_task_timing(task)
-        raw = str(exc)
+        raw = raw_error_text(exc)
         # 失败文案有三条出口（error 字段、任务日志、系统通知），未知异常时
         # friendly_* 会原样返回底层文本，网关回显的明文 Key 就会跟着落进 task.json
         message = redact_secrets(
@@ -2647,8 +2898,10 @@ def friendly_task_error(
         )
     if step_name == NOTE_STEP_NAME:
         return friendly_llm_error(lowered, message)
-    if source == VideoSource.DOUYIN:
-        # 抖音抓取已停用：平台检测保留（链接会被正确识别为抖音），只给出可执行的替代路径
+    if source == VideoSource.DOUYIN and step_name in DOUYIN_HINT_STEPS:
+        # 抖音提示只对「取视频信息 / 准备音频」这两步成立——那才是浏览器通道与媒体
+        # 地址相关的地方。转写、生成笔记等后续步骤的失败跟抖音无关，必须原样透传，
+        # 否则用户会拿着「链接解析失败」去重投一条本来没问题的链接（线上已发生）。
         return DOUYIN_HINT
     if source == VideoSource.BILIBILI and any(
         marker in lowered for marker in ("403", "412", "forbidden", "precondition")
@@ -2726,6 +2979,17 @@ def redact_secrets(text: str, secret: str = "") -> str:
     if secret and len(secret) >= 8:
         cleaned = cleaned.replace(secret, secret_box.mask_secret(secret))
     return cleaned
+
+
+def raw_error_text(exc: BaseException) -> str:
+    """异常的可读文本；``str()`` 为空时退回类型名。
+
+    httpx 的 ``ReadError`` / ``WriteError`` / 各类 ``TimeoutException`` 在服务端
+    提前拒绝时会抛**消息为空**的异常。直接用 ``str(exc)`` 会让日志里的「底层错误」
+    变成空白——线上那次「底层错误：」后面什么都没有，就是这么来的。
+    """
+    text = str(exc).strip()
+    return text or f"{type(exc).__name__}（该异常未附带文本消息）"
 
 
 def scrub_technical_error(raw: str, secret: str = "") -> str:
@@ -2833,7 +3097,17 @@ def summary_style_label(style: str) -> str:
         "detailed": "详细笔记 + 点评分析",
         "faithful": "详细复原（仅视频内容）",
         "concise": "精简摘要",
+        "keypoints": "要点提炼",
     }.get(style, style)
+
+
+def content_type_label(content_type: str) -> str:
+    """内容场景的中文标签；general（或未知值）返回空串，页脚据此决定是否输出该行。"""
+    return {
+        "tutorial": "教程",
+        "knowledge": "知识",
+        "learning": "学习",
+    }.get(content_type, "")
 
 
 def append_note_footer(
@@ -2842,25 +3116,80 @@ def append_note_footer(
     model_type: str,
     model: str | None,
     style: str,
+    content_type: str = "general",
 ) -> str:
     """确定性追加来源与生成配置，避免不同风格遗漏关键追溯信息。"""
     source = source_url.strip() if source_url else ""
     source_line = source or "本地文件（未提供视频链接）"
     model_line = model.strip() if model else "未指定模型"
-    footer = "\n".join(
-        [
-            "---",
-            f"来源：{source_line}",
-            f"生成模型：{model_type} · {model_line}",
-            f"笔记风格：{summary_style_label(style)}",
-        ]
-    )
+    lines = [
+        "---",
+        f"来源：{source_line}",
+        f"生成模型：{model_type} · {model_line}",
+        f"笔记风格：{summary_style_label(style)}",
+    ]
+    scene = content_type_label(content_type)
+    if scene:
+        lines.append(f"内容场景：{scene}")
+    footer = "\n".join(lines)
     return f"{summary.rstrip()}\n\n{footer}\n"
 
 
+# 页脚是 append_note_footer 确定性写出来的，可以按结构定位：补写正文要插在它前面，
+# 排在“来源／生成模型”之后会读起来像附注。
+_NOTE_FOOTER_RE = re.compile(
+    r"^---\n来源：.*\n生成模型：.*\n笔记风格：.*(?:\n内容场景：.*)?\n?\Z", re.MULTILINE
+)
+
+
+def insert_tail_patch(draft: str, body: str, missing_start: str) -> str:
+    """把补写片段插到笔记页脚之前；没有页脚（用户改过）就接在末尾。"""
+    section = f"### 补遗（{missing_start} 之后）\n\n{body.strip()}"
+    match = _NOTE_FOOTER_RE.search(draft)
+    if not match:
+        return f"{draft.rstrip()}\n\n{section}\n"
+    head = draft[: match.start()].rstrip()
+    tail = draft[match.start() :].strip("\n")
+    return f"{head}\n\n{section}\n\n{tail}\n"
+
+
+def record_patch_result(
+    task_id: str, markdown: str, coverage: dict[str, Any] | None, log_line: str
+) -> None:
+    """补写完成后更新任务状态：内存里有任务就顺带落盘，没有就直接改 task.json。
+
+    服务重启后旧任务只在磁盘上，这时不能依赖 ``tasks``（``persist_task_runtime``
+    以它为唯一来源），否则用户补写完旧笔记、界面刷新一看还是残的。
+    """
+    task = tasks.get(task_id)
+    if task is not None and isinstance(task.get("result"), dict):
+        task["result"]["markdown"] = markdown
+        if coverage is not None:
+            task["result"]["coverage"] = coverage
+        if log_line not in task.get("logs", []):
+            task.setdefault("logs", []).append(log_line)
+        persist_task_runtime(task_id)
+        return
+    path = task_directory(task_id) / "task.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    result = runtime.get("result")
+    if isinstance(result, dict) and coverage is not None:
+        result["coverage"] = coverage
+    logs = runtime.get("logs")
+    if isinstance(logs, list) and log_line not in logs:
+        logs.append(log_line)
+    write_text_atomically(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 # 笔记里的时间点写法：[MM:SS] 或 [MM:SS-MM:SS]（也容忍 [H:MM:SS] 与全角连接符）。
-# 外层 (?<!\[) 与末尾 (?!\() 一起保证幂等：链接化后写成 [[MM:SS]](url)，
-# 内层时间戳前面是 "["、后面是 "]"，都不会被二次包裹。
+# 外层 (?<!\[) 与末尾 (?!\() 一起保证幂等：链接化后写成 [MM:SS](url)，
+# 时间戳后面紧跟 "("，不会再被二次包裹；前面有 "[[" 的旧写法同样不会再被包一层。
 _TIMESTAMP_PATTERN = re.compile(
     r"(?<!\[)\[(\d{1,3}:\d{2}(?::\d{2})?)(?:\s*[-–—~]\s*(\d{1,3}:\d{2}(?::\d{2})?))?\](?!\()"
 )
@@ -2939,9 +3268,10 @@ def seek_url(source_url: str | None, seconds: int) -> str | None:
 def linkify_timestamps(markdown: str, source_url: str | None) -> str:
     """把笔记里的时间点换成可点击跳转到原片对应位置的链接。
 
-    区间取起点（[02:29-02:57] 跳到 02:29）。写成 ``[[MM:SS]](url)`` 是为了保留
-    原来那对方括号：Markdown 里 ``[文字](链接)`` 的方括号是语法，会被渲染器吃掉，
-    而笔记的观感、以及前端「萌芽」按 ``[MM:SS-MM:SS]`` 结尾剥离标题的逻辑都依赖它。
+    区间取起点（[02:29-02:57] 跳到 02:29）。写成 ``[MM:SS](url)``——只留一层方括号：
+    它既是 Markdown 链接语法，也让网址彻底不显示，渲染出来就是可点击的时段本身。
+    旧写法 ``[[MM:SS]](url)`` 多包了一层，在 Obsidian 里会先被当成 ``[[双链]]`` 吃掉，
+    外层链接失效、网址裸露成一大串，网页端（marked）却看不出问题。
 
     来源是本地文件等没有可跳转地址的情形原样返回；代码块与行内代码里的时间点
     也保持原样。
@@ -2956,7 +3286,7 @@ def linkify_timestamps(markdown: str, source_url: str | None) -> str:
         url = seek_url(source_url, seconds)
         if not url:
             return match.group(0)
-        return f"[{match.group(0)}]({url})"
+        return f"{match.group(0)}({url})"
 
     parts = _CODE_SEGMENT_PATTERN.split(markdown)
     for index in range(0, len(parts), 2):

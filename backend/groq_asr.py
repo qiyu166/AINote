@@ -44,6 +44,10 @@ SAMPLE_RATE = 16000
 CHUNK_SECONDS = 600
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600.0
+# 正式上传前做一次零成本的鉴权预检（列模型不消耗额度）
+KEY_PROBE_URL = f"{GROQ_BASE_URL}/models"
+# 分片上传的重试次数：连接被中途重置是常见瞬态，重试往往能直接扛过去
+UPLOAD_ATTEMPTS = 3
 
 ProgressCallback = Callable[[float, float], Any]
 
@@ -168,6 +172,76 @@ def _explain_http_error(status: int, body: str) -> str:
     return f"Groq 转写失败 HTTP {status}：{text}"
 
 
+def _explain_transport_error(exc: Exception | None) -> str:
+    """连接层失败的文案。**永不返回空串**——httpx 的 ReadError/WriteError 消息就是空的。
+
+    实测：同一个 7MB 分片，服务端提前拒绝时 curl 能拿到干净的 400/401，
+    httpx 却抛一个 *消息为空* 的 ``ReadError``，把真实状态码整个吞掉。
+    """
+    if exc is None:
+        return "Groq 上传失败：未知连接错误"
+    name = type(exc).__name__
+    detail = str(exc).strip()
+    head = f"Groq 连接失败（{name}）" + (f"：{detail}" if detail else "")
+    if isinstance(exc, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
+        return (
+            f"{head}。上传途中连接被中断，通常是 Groq 提前拒绝了这次请求"
+            "（Key 失效、账号限流或地区限制），也可能是网络/代理不稳定；已自动重试。"
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{head}。请求超时，请检查网络或代理后重试。"
+    return f"{head}。请检查网络/代理后重试。"
+
+
+async def _probe_api_key(client: httpx.AsyncClient, api_key: str) -> None:
+    """正式上传前做一次零成本鉴权预检，把「Key 失效 / 地区封锁 / 限流」变成可读文案。
+
+    为什么需要：真实分片是 7–19MB，而 httpx 在服务端**提前拒绝**时会抛一个消息为空的
+    ``ReadError``，原本清清楚楚的 401/403/429 就这样没了。先用一个小请求问一句，
+    这类问题就能在动手上传之前说清楚。
+    """
+    try:
+        response = await client.get(
+            KEY_PROBE_URL, headers={"Authorization": f"Bearer {api_key}"}, timeout=15.0
+        )
+    except httpx.TransportError:
+        return  # 网络层问题交给正式上传去报，别在这里抢先误报
+    if response.status_code != 200:
+        raise RuntimeError(_explain_http_error(response.status_code, response.text))
+
+
+async def _post_chunk(
+    client: httpx.AsyncClient,
+    wav_path: Path,
+    groq_model: str,
+    api_key: str,
+    cancel_event: Any,
+) -> httpx.Response:
+    """上传一个分片；连接被中途重置时重试，全部失败则抛出可读的错误。"""
+    last_error: Exception | None = None
+    for attempt in range(UPLOAD_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError("任务已取消")
+        try:
+            with wav_path.open("rb") as fh:
+                return await client.post(
+                    GROQ_TRANSCRIBE_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": (wav_path.name, fh, "audio/wav")},
+                    data={
+                        "model": groq_model,
+                        "response_format": "verbose_json",
+                        # 不锁 language：让 Whisper 自检，中英混排的内容也不会被带偏
+                        "temperature": "0",
+                    },
+                )
+        except httpx.TransportError as exc:
+            last_error = exc
+            if attempt + 1 < UPLOAD_ATTEMPTS:
+                await asyncio.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(_explain_transport_error(last_error)) from last_error
+
+
 async def transcribe(
     media_path: Path,
     model_name: str,
@@ -200,24 +274,17 @@ async def transcribe(
                 f"音频分片超过 Groq 单文件上限：{', '.join(oversized)}，请调小 CHUNK_SECONDS"
             )
 
-        headers = {"Authorization": f"Bearer {api_key}"}
         chunks_done = 0
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            # 动手传 7–19MB 之前，先用一个零成本小请求把「Key/地区/限流」这类
+            # 会被提前拒绝、又会被 httpx 吞成空 ReadError 的问题问清楚
+            await _probe_api_key(client, api_key)
             for wav_path, offset_seconds in pieces:
                 if cancel_event is not None and cancel_event.is_set():
                     raise asyncio.CancelledError("任务已取消")
-                with wav_path.open("rb") as fh:
-                    response = await client.post(
-                        GROQ_TRANSCRIBE_URL,
-                        headers=headers,
-                        files={"file": (wav_path.name, fh, "audio/wav")},
-                        data={
-                            "model": groq_model,
-                            "response_format": "verbose_json",
-                            # 不锁 language：让 Whisper 自检，中英混排的内容也不会被带偏
-                            "temperature": "0",
-                        },
-                    )
+                response = await _post_chunk(
+                    client, wav_path, groq_model, api_key, cancel_event
+                )
                 if response.status_code != 200:
                     raise RuntimeError(_explain_http_error(response.status_code, response.text))
 

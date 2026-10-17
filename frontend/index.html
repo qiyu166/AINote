@@ -52,7 +52,18 @@
                     <option value="detailed" selected>详细笔记 + 点评分析</option>
                     <option value="faithful">详细复原（仅视频内容）</option>
                     <option value="concise">精简摘要</option>
+                    <option value="keypoints">要点提炼（只看重点）</option>
                 </select>
+            </label>
+            <label class="field" id="contentTypeField">
+                <span>内容场景</span>
+                <select id="contentType">
+                    <option value="general" selected>通用</option>
+                    <option value="tutorial">教程</option>
+                    <option value="knowledge">知识</option>
+                    <option value="learning">学习</option>
+                </select>
+                <small>按内容类型组织结构：教程给步骤、知识给概念与边界、学习给重点与自测。</small>
             </label>
             <label class="field" id="reasoningEffortField">
                 <span>推理强度</span>
@@ -141,6 +152,25 @@
                 <span>buvid3</span>
                 <input type="password" id="buvid3" autocomplete="off">
             </label>
+        </details>
+
+        <details id="douyinCredentialsSection" class="config-section collapsible-section">
+            <summary>抖音访问凭据（可选）</summary>
+            <p class="section-note">抖音接口要浏览器登录态（风控会拦匿名请求）。扫码或粘贴 cookie 后保存在本机，之后抖音链接会自动带上。</p>
+            <div class="bili-login-row">
+                <button id="douyinLoginBtn" class="button secondary" type="button">扫码登录导入</button>
+                <button id="douyinLoginCancelBtn" class="button ghost" type="button" hidden>取消</button>
+                <span id="douyinLoginStatus" class="bili-login-status"></span>
+            </div>
+            <label class="field">
+                <span>粘贴 cookie（name=value; name2=value2）</span>
+                <textarea id="douyinCookieText" rows="3" autocomplete="off" placeholder="ttwid=...; sessionid=...; Uifid=..."></textarea>
+            </label>
+            <div class="bili-login-row">
+                <button id="douyinCookieSaveBtn" class="button secondary" type="button">保存到本机</button>
+                <button id="douyinCookieClearBtn" class="button ghost" type="button">清除</button>
+                <span id="douyinCookieStatus" class="bili-login-status"></span>
+            </div>
         </details>
 
         <div class="sidebar-actions">
@@ -381,6 +411,15 @@
                 <code id="outputPath"></code>
                 <span id="taskDirNotice" hidden> · 任务目录 <code id="taskDirPath"></code></span>
             </div>
+            <div id="coverageNotice" class="coverage-notice" hidden>
+                <div class="coverage-title">⚠️ 这篇笔记没有写到视频结尾</div>
+                <div id="coverageSummary" class="coverage-body"></div>
+                <div id="coverageCost" class="coverage-body coverage-cost"></div>
+                <div id="coverageActions" class="coverage-actions" hidden>
+                    <button id="patchTailBtn" class="button ghost" type="button">补写结尾</button>
+                    <span id="patchTailStatus" class="coverage-status"></span>
+                </div>
+            </div>
             <article id="markdownContent" class="markdown-body"></article>
             <section id="sproutPanel" class="sprout-panel" hidden>
                 <div class="sprout-panel-head">
@@ -395,6 +434,6 @@
 </div>
 
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<script src="script.js?v=20261003-4"></script>
+<script src="script.js?v=20261014-1"></script>
 </body>
 </html>

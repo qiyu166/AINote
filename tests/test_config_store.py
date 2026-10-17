@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from backend import main, secret_box
 from backend.config_store import (
     BILI_CREDENTIALS_FILE,
+    DOUYIN_CREDENTIALS_FILE,
     LLM_CONFIG_FILE,
     LLM_KEYS_FILE,
     BiliCredentialsUnavailable,
@@ -415,3 +416,49 @@ def test_bili_credentials_endpoints(monkeypatch, tmp_path) -> None:
     assert blank.status_code == 400
     assert "SESSDATA" in blank.json()["detail"]
     assert client.get("/api/bili-credentials").json() == {"saved": False}
+
+
+def test_douyin_credentials_roundtrip_and_clear(tmp_path) -> None:
+    store = ConfigStore(tmp_path)
+    assert store.load_douyin_credentials() is None
+    assert store.douyin_credentials_status() == {"saved": False}
+
+    cookies = {"ttwid": "t-1", "sessionid": "s-1", "Uifid": "u-1"}
+    store.save_douyin_credentials(cookies)
+    assert store.load_douyin_credentials() == cookies
+
+    status = store.douyin_credentials_status()
+    assert status["saved"] is True
+    assert status["has_login"] is True
+    assert status["cookie_count"] == 3
+    assert sorted(status["cookie_names"]) == ["Uifid", "sessionid", "ttwid"]
+
+    store.clear_douyin_credentials()
+    assert store.load_douyin_credentials() is None
+    assert store.douyin_credentials_status() == {"saved": False}
+
+
+def test_douyin_credentials_anonymous_status_has_no_login(tmp_path) -> None:
+    """只有 ttwid/Uifid 而没有 sessionid 时，状态要如实说「没登录」。"""
+    store = ConfigStore(tmp_path)
+    store.save_douyin_credentials({"ttwid": "t-1", "Uifid": "u-1"})
+    status = store.douyin_credentials_status()
+    assert status["saved"] is True
+    assert status["has_login"] is False
+
+
+def test_douyin_credentials_never_store_plaintext(tmp_path) -> None:
+    store = ConfigStore(tmp_path)
+    store.save_douyin_credentials({"sessionid": "plain-session-value"})
+    raw = (tmp_path / DOUYIN_CREDENTIALS_FILE).read_text(encoding="utf-8")
+    assert "plain-session-value" not in raw
+    # 字段名清单是非敏感的，允许明文；它供状态视图使用，不需要解密
+    assert "sessionid" in raw
+
+
+def test_douyin_credentials_reject_blank(tmp_path) -> None:
+    store = ConfigStore(tmp_path)
+    with pytest.raises(ValueError):
+        store.save_douyin_credentials({})
+    with pytest.raises(ValueError):
+        store.save_douyin_credentials({"sessionid": "   "})

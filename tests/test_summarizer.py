@@ -429,6 +429,159 @@ async def test_faithful_patch_cancellation_still_propagates() -> None:
         )
 
 
+def test_tail_coverage_reports_gap_and_patch_budget() -> None:
+    """覆盖度报告是给用户看的：缺口多大、补写能不能做、要花多少额度。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    segments = [
+        TranscriptSegment(0, 300, "前半部分"),
+        TranscriptSegment(300, 591, "结尾的题目讲解"),
+    ]
+    draft = "# 笔记\n\n[00:01-04:00] 前半部分要点"
+
+    coverage = summarizer.tail_coverage(draft, segments)
+
+    assert coverage is not None
+    assert coverage.note_end == 240.0
+    assert coverage.coverage_end == 591.0
+    assert round(coverage.gap_seconds) == 351
+    assert coverage.patch_available is True
+    assert coverage.covers_full_gap is True
+    assert coverage.missing_characters > 0
+    report = coverage.to_dict()
+    assert report["note_end"] == "04:00"
+    assert report["coverage_end"] == "09:51"
+    assert report["patch_available"] is True
+    assert report["patch_timeout_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_detailed_gap_leaves_report_on_the_summarizer() -> None:
+    """detailed 不自动补写，但必须把报告留在实例上——任务结果靠它提示前端。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+
+    async def complete(prompt, **kwargs):
+        raise AssertionError("detailed 不应自动补写")
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "前半部分"),
+        TranscriptSegment(300, 591, "结尾的题目讲解"),
+    ]
+    draft = "# 笔记\n\n[00:01-04:00] 前半部分要点"
+
+    result = await summarizer._ensure_tail_coverage(
+        "标题", draft, segments, "detailed", "max", None
+    )
+
+    assert result == draft
+    assert summarizer.coverage is not None
+    assert summarizer.coverage.patch_available is True
+    assert round(summarizer.coverage.gap_seconds) == 351
+
+
+def test_tail_coverage_marks_oversized_gap_unavailable() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    segments = [
+        TranscriptSegment(index * 18.0, index * 18.0 + 18.0, f"第 {index} 句口播内容")
+        for index in range(300)
+    ]
+    draft = "# 笔记\n\n[00:01-12:00] 前段要点\n\n后面每段都只写了文字，没再带时间点"
+
+    coverage = summarizer.tail_coverage(draft, segments)
+
+    assert coverage is not None
+    assert coverage.gap_seconds > TAIL_PATCH_MAX_GAP_SECONDS
+    assert coverage.patch_available is False
+    assert "不提供补写" in (coverage.patch_blocked_reason or "")
+
+
+def test_tail_coverage_is_none_without_timestamps() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    segments = [TranscriptSegment(0, 10, "内容")]
+    assert summarizer.tail_coverage("这篇笔记一个时间点都没有", segments) is None
+
+
+@pytest.mark.asyncio
+async def test_patch_missing_tail_returns_body_for_manual_use() -> None:
+    """用户手动补写走 patch_missing_tail：拿得到片段本身，好在两处产物上分别拼接。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+
+    async def complete(prompt, max_tokens, effort="auto", retry_empty=True, **kwargs):
+        return "补写的结尾内容"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "前半部分"),
+        TranscriptSegment(300, 591, "结尾的题目讲解"),
+    ]
+    draft = "# 笔记\n\n[00:01-04:00] 前半部分要点"
+
+    outcome = await summarizer.patch_missing_tail("标题", draft, segments, effort="max")
+
+    assert outcome.ok is True
+    assert outcome.body == "补写的结尾内容"
+    assert outcome.missing_start == "05:00"
+    assert "### 补遗（05:00 之后）" in (outcome.text or "")
+
+
+@pytest.mark.asyncio
+async def test_patch_missing_tail_reports_empty_answer() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+
+    async def complete(prompt, **kwargs):
+        return "   "
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "前半部分"),
+        TranscriptSegment(300, 591, "结尾的题目讲解"),
+    ]
+
+    outcome = await summarizer.patch_missing_tail(
+        "标题", "# 笔记\n\n[00:01-04:00] 要点", segments, effort="max"
+    )
+
+    assert outcome.ok is False
+    assert outcome.error_kind == "empty"
+    assert outcome.text is None
+
+
+@pytest.mark.asyncio
+async def test_patch_missing_tail_reports_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    import backend.llm_summarizer as module
+
+    monkeypatch.setattr(module, "TAIL_PATCH_TIMEOUT_SECONDS", 0.05)
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+
+    async def complete(prompt, **kwargs):
+        await asyncio.sleep(30)
+        return "永远来不及返回"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(0, 300, "前半部分"),
+        TranscriptSegment(300, 591, "结尾的题目讲解"),
+    ]
+
+    outcome = await summarizer.patch_missing_tail(
+        "标题", "# 笔记\n\n[00:01-04:00] 要点", segments, effort="max"
+    )
+
+    assert outcome.ok is False
+    assert outcome.error_kind == "timeout"
+    # 失败要能直接展示给用户，不能只给一个异常类型
+    assert "秒" in (outcome.error or "")
+
+
 @pytest.mark.asyncio
 async def test_complete_reports_stream_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     """深度思考阶段（只有 reasoning 增量）也要周期上报进度，否则与卡死无法区分。"""
@@ -2165,3 +2318,77 @@ async def test_short_transcript_is_not_split_by_timestamp_overhead() -> None:
 
     assert not any("个连续片段" in prompt for prompt in prompts), "不该再发分片压缩请求"
     assert len(prompts) == 1
+
+
+def test_note_prompt_keypoints_lists_views_and_conclusions() -> None:
+    """要点提炼要输出清单，而不是又一份连贯摘要。"""
+    prompt = LLMSummarizer._note_prompt("测试视频", "[00:10-00:20] 原文", {}, "keypoints")
+    assert "核心观点" in prompt
+    assert "结论清单" in prompt
+    assert "关键时间点" in prompt
+    assert "视频要点" in prompt
+    # 每条观点都要有时间锚点，且不得编造
+    assert "时间锚点" in prompt
+    assert "时间点只能取自材料" in prompt
+
+
+def test_note_prompt_scenario_block_organizes_structure() -> None:
+    """场景块给出结构；general 不改变历史行为。"""
+    tutorial = LLMSummarizer._note_prompt(
+        "测试视频", "[00:10-00:20] 原文", {}, "detailed", None, "tutorial"
+    )
+    assert "操作步骤" in tutorial and "易错点" in tutorial
+    knowledge = LLMSummarizer._note_prompt(
+        "测试视频", "[00:10-00:20] 原文", {}, "detailed", None, "knowledge"
+    )
+    assert "适用边界" in knowledge
+    learning = LLMSummarizer._note_prompt(
+        "测试视频", "[00:10-00:20] 原文", {}, "detailed", None, "learning"
+    )
+    assert "自测" in learning
+    # 默认 general：不含场景小节，且保留原来的"不必凑固定模板"
+    general = LLMSummarizer._note_prompt("测试视频", "[00:10-00:20] 原文", {}, "detailed")
+    assert "操作步骤" not in general
+    assert "不必凑固定模板" in general
+
+
+def test_scenario_block_uses_emphasis_for_short_styles() -> None:
+    """keypoints/concise 结构已由风格定死，场景只带取材侧重，不塞固定小节。"""
+    emphasis = LLMSummarizer._scenario_block("tutorial", "keypoints")
+    structure = LLMSummarizer._scenario_block("tutorial", "detailed")
+    assert emphasis and "操作步骤" not in emphasis
+    assert "操作步骤" in structure
+    assert LLMSummarizer._scenario_block("general", "detailed") == ""
+    assert LLMSummarizer._scenario_block("cooking", "detailed") == ""
+
+
+def test_generate_summary_rejects_unknown_content_type() -> None:
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    with pytest.raises(ValueError):
+        asyncio.run(
+            summarizer.generate_summary(
+                "标题", [TranscriptSegment(0, 10, "内容")], content_type="cooking"
+            )
+        )
+
+
+def test_keypoints_does_not_use_long_transcript_sectioning() -> None:
+    """keypoints 是挑重点的风格：转录再长也不走"逐段完整直写"。"""
+    summarizer = object.__new__(LLMSummarizer)
+    summarizer.warnings = []
+    prompts: list[str] = []
+
+    async def complete(prompt, max_tokens, effort="auto", retry_empty=True, **kwargs):
+        prompts.append(prompt)
+        return "## 核心观点\n\n1. [00:00-00:01] 测试观点"
+
+    summarizer._complete = complete
+    segments = [
+        TranscriptSegment(index * 1.5, index * 1.5 + 1.4, "字" * 100) for index in range(300)
+    ]
+    assert LLMSummarizer._is_long_transcript(segments)
+
+    asyncio.run(summarizer.generate_summary("标题", segments, style="keypoints"))
+
+    assert not any("这是全片第" in prompt for prompt in prompts)

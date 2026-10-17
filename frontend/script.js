@@ -261,6 +261,7 @@ function bindEvents() {
     }
     bindListener('sproutCloseBtn', 'click', closeSproutPanel);
     bindListener('copyNoteBtn', 'click', copyFullNote);
+    bindListener('patchTailBtn', 'click', patchMissingTail);
     bindListener('formatSelect', 'change', toggleImageLayout);
     bindListener('refreshRecentTasksBtn', 'click', () => loadRecentTasks());
     bindListener('loadMoreTasksBtn', 'click', loadMoreRecentTasks);
@@ -330,6 +331,8 @@ function bindEvents() {
     bindListener('biliPagesNoneBtn', 'click', () => setBiliPagesSelection('none'));
     bindListener('biliPagesInvertBtn', 'click', () => setBiliPagesSelection('invert'));
     initBiliLogin();
+    initDouyinLogin();
+    loadDouyinCredentialStatus();
     bindListener('includeScreenshots', 'change', toggleScreenshotSettings);
     bindListener('localFile', 'change', () => {
         updateFileInfo();
@@ -790,6 +793,7 @@ const GLOBAL_PREF_KEYS = [
     'include_screenshots',
     'use_gpu',
     'summary_style',
+    'content_type',
     'reasoning_effort',
     'processing_mode',
     'output_mode'
@@ -813,6 +817,7 @@ function defaultPrefs() {
             include_screenshots: false,
             use_gpu: false,
             summary_style: 'detailed',
+            content_type: 'general',
             reasoning_effort: 'auto',
             processing_mode: 'restart',
             output_mode: 'note'
@@ -1097,6 +1102,9 @@ function applyPreferencesToForm() {
     byId('screenshotInterval').value = prefs.global.screenshot_interval;
     byId('includeScreenshots').checked = prefs.global.include_screenshots === true;
     byId('summaryStyle').value = prefs.global.summary_style;
+    // 旧版 HTML 缓存里可能没有这个下拉，取不到就跳过（提交时同样有兜底）
+    const contentTypeSelect = byId('contentType');
+    if (contentTypeSelect) contentTypeSelect.value = prefs.global.content_type || 'general';
     // 存过「最大」的旧偏好落到「质量」而不是被判成非法值退回 auto：
     // 这个 select 的值就是提交给后端的 reasoning_effort，静默变 auto 会改变实际档位
     byId('reasoningEffort').value = prefs.global.reasoning_effort === 'max'
@@ -1144,6 +1152,8 @@ function persistGlobals() {
     values.screenshot_interval = byId('screenshotInterval').value;
     values.include_screenshots = byId('includeScreenshots').checked;
     values.summary_style = byId('summaryStyle').value;
+    const contentTypeSelect = byId('contentType');
+    if (contentTypeSelect) values.content_type = contentTypeSelect.value || 'general';
     values.reasoning_effort = byId('reasoningEffort').value;
     values.processing_mode = document.querySelector('input[name="processingMode"]:checked')?.value
         || values.processing_mode;
@@ -1589,7 +1599,7 @@ function setOutputMode(mode) {
 function applyOutputMode() {
     const transcript = isTranscriptMode();
     // 笔记专用设置整组藏掉（不是灰掉）：这条路上没有大模型调用，也没有第 5 步截图
-    ['summaryStyleField', 'reasoningEffortField', 'includeScreenshotsField', 'screenshotIntervalField']
+    ['summaryStyleField', 'contentTypeField', 'reasoningEffortField', 'includeScreenshotsField', 'screenshotIntervalField']
         .forEach((id) => {
             const element = byId(id);
             if (element) element.hidden = transcript;
@@ -1942,6 +1952,155 @@ async function cancelBiliLogin() {
     }
 }
 
+// ---- 抖音凭据：扫码登录或粘贴 cookie，保存到本机后由后端自动带上 ----
+
+let douyinLoginTimer = null;
+
+function initDouyinLogin() {
+    bindListener('douyinLoginBtn', 'click', startDouyinLogin);
+    bindListener('douyinLoginCancelBtn', 'click', cancelDouyinLogin);
+    bindListener('douyinCookieSaveBtn', 'click', saveDouyinCookieText);
+    bindListener('douyinCookieClearBtn', 'click', clearDouyinCredentials);
+}
+
+async function startDouyinLogin() {
+    if (douyinLoginTimer) return;
+    try {
+        const response = await fetch(`${API_BASE}/douyin-login/start`, { method: 'POST' });
+        const data = await readResponse(response, '启动抖音扫码登录失败');
+        if (!data.ok) {
+            showToast(data.error || data.message || '启动失败', 'error');
+            return;
+        }
+        if (data.state === 'ready' && data.cookies) {
+            // 该浏览器配置已登录过：直接保存，无需等待弹窗
+            await importDouyinCookies(data.cookies);
+            cancelDouyinLogin();
+            return;
+        }
+        byId('douyinLoginStatus').textContent = data.message || '请在弹出的窗口中扫码登录';
+        byId('douyinLoginCancelBtn').hidden = false;
+        byId('douyinLoginBtn').disabled = true;
+        douyinLoginTimer = window.setInterval(pollDouyinLogin, 2000);
+        pollDouyinLogin();
+    } catch (error) {
+        showToast(`启动失败：${error.message}`, 'error');
+    }
+}
+
+async function pollDouyinLogin() {
+    try {
+        const response = await fetch(`${API_BASE}/douyin-login/status`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取登录状态失败');
+        byId('douyinLoginStatus').textContent = data.message || '';
+        if (data.state === 'ready' && data.cookies) {
+            stopDouyinLoginPolling();
+            await importDouyinCookies(data.cookies);
+        } else if (['failed', 'timeout'].includes(data.state)) {
+            stopDouyinLoginPolling();
+            showToast(data.message || '导入失败', 'error');
+        }
+    } catch {
+        // 瞬时失败不停止轮询，避免扫码成功后错过回填
+        byId('douyinLoginStatus').textContent = '状态读取失败，正在重试…';
+    }
+}
+
+function stopDouyinLoginPolling() {
+    if (douyinLoginTimer !== null) {
+        window.clearInterval(douyinLoginTimer);
+        douyinLoginTimer = null;
+    }
+    byId('douyinLoginBtn').disabled = false;
+    byId('douyinLoginCancelBtn').hidden = true;
+    byId('douyinLoginStatus').textContent = '';
+}
+
+async function cancelDouyinLogin() {
+    stopDouyinLoginPolling();
+    try {
+        await fetch(`${API_BASE}/douyin-login/cancel`, { method: 'POST' });
+    } catch {
+        // 后端不可达时忽略，浏览器窗口由用户自行关闭
+    }
+}
+
+async function importDouyinCookies(cookies) {
+    try {
+        await persistDouyinCookies(cookies);
+        byId('douyinCookieText').value = cookieTextFromDict(cookies);
+        showToast('抖音凭据已保存到本机', 'success');
+        await loadDouyinCredentialStatus();
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+function parseCookieText(text) {
+    const cookies = {};
+    (text || '').split(';').forEach((part) => {
+        const index = part.indexOf('=');
+        if (index <= 0) return;
+        const name = part.slice(0, index).trim();
+        const value = part.slice(index + 1).trim();
+        if (name && value) cookies[name] = value;
+    });
+    return cookies;
+}
+
+function cookieTextFromDict(cookies) {
+    return Object.entries(cookies || {})
+        .map(([name, value]) => `${name}=${value}`)
+        .join('; ');
+}
+
+async function persistDouyinCookies(cookies) {
+    const response = await fetch(`${API_BASE}/douyin-credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies })
+    });
+    return readResponse(response, '保存抖音凭据失败');
+}
+
+async function saveDouyinCookieText() {
+    const cookies = parseCookieText(byId('douyinCookieText').value);
+    if (!Object.keys(cookies).length) {
+        showToast('请先粘贴 cookie（形如 ttwid=...; sessionid=...）', 'error');
+        return;
+    }
+    await importDouyinCookies(cookies);
+}
+
+async function clearDouyinCredentials() {
+    try {
+        await fetch(`${API_BASE}/douyin-credentials`, { method: 'DELETE' });
+        byId('douyinCookieText').value = '';
+        await loadDouyinCredentialStatus();
+        showToast('已清除本机抖音凭据', 'success');
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+}
+
+async function loadDouyinCredentialStatus() {
+    const status = byId('douyinCookieStatus');
+    if (!status) return;
+    try {
+        const response = await fetch(`${API_BASE}/douyin-credentials`, { cache: 'no-store' });
+        const data = await readResponse(response, '读取抖音凭据状态失败');
+        if (!data.saved) {
+            status.textContent = '本机未保存抖音凭据';
+            return;
+        }
+        status.textContent = data.has_login
+            ? `本机已保存 ${data.cookie_count} 个字段（含登录态）`
+            : `本机已保存 ${data.cookie_count} 个字段（未含 sessionid，可能还没登录）`;
+    } catch {
+        status.textContent = '';
+    }
+}
+
 function updateFileInfo() {
     if (byId('sourceType').value !== 'local') {
         byId('fileInfo').textContent = '支持常见视频链接；平台字幕可用时优先读取';
@@ -2220,6 +2379,8 @@ function buildSummarizeConfig(
         config.screenshot_interval = normalizeScreenshotInterval();
         config.include_screenshots = byId('includeScreenshots').checked;
         config.summary_style = byId('summaryStyle').value;
+        const contentTypeSelect = byId('contentType');
+        config.content_type = contentTypeSelect ? contentTypeSelect.value : 'general';
         config.reasoning_effort = byId('reasoningEffort').value;
         config.llm_config = llmConfig;
     }
@@ -2233,6 +2394,9 @@ function buildSummarizeConfig(
             buvid3: byId('buvid3').value.trim()
         };
     }
+    // 抖音凭据：输入框里粘贴过的优先随请求下发；没粘贴时后端会自动读本机已保存的
+    const douyinCookies = parseCookieText(byId('douyinCookieText').value);
+    if (Object.keys(douyinCookies).length) config.douyin_cookie = douyinCookies;
     if (uploadTaskId) config.upload_task_id = uploadTaskId;
     if (resumeTaskId && !forceRestart) config.resume_task_id = resumeTaskId;
     return config;
@@ -2634,7 +2798,114 @@ async function showResult(result) {
     byId('outputNotice').hidden = !primaryPath;
     byId('taskDirPath').textContent = outputDirectory;
     byId('taskDirNotice').hidden = !(archivedPath && outputDirectory);
+    renderCoverageNotice(result);
+    // 本次版本之前生成的老任务结果里没有 coverage 字段，现算一份再提示
+    if (!transcript && !result.coverage) void loadCoverageNotice(currentTaskId);
     return true;
+}
+
+async function loadCoverageNotice(taskId) {
+    if (!taskId) return;
+    try {
+        const response = await fetch(
+            `${API_BASE}/task/${encodeURIComponent(taskId)}/coverage`,
+            { cache: 'no-store' }
+        );
+        if (!response.ok) return;
+        const data = await response.json();
+        // 等待期间用户可能已经切到别的任务，丢弃过期结果
+        if (taskId !== currentTaskId) return;
+        renderCoverageNotice({ coverage: data.coverage });
+    } catch {
+        // 覆盖度只是一条提示，取不到就不提示，别把结果区弄成错误态
+    }
+}
+
+// ---- 笔记覆盖度：缺了结尾就把缺口与补写代价摆出来，补不补由用户定 ----
+// 后端生成时会核对笔记有没有写到转写结尾（result.coverage）。缺了不再静默：
+// 这里如实列出缺口多大、补写要花多少 token / 多久、会不会覆盖归档文件，然后等用户点。
+
+function formatGapLabel(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    if (!minutes) return `${rest} 秒`;
+    return rest ? `${minutes} 分 ${String(rest).padStart(2, '0')} 秒` : `${minutes} 分钟`;
+}
+
+function renderCoverageNotice(result) {
+    const notice = byId('coverageNotice');
+    if (!notice) return;
+    const coverage = result && typeof result.coverage === 'object' ? result.coverage : null;
+    // 阈值与后端 TAIL_GAP_SECONDS 同口径：60 秒以内不算缺口
+    if (!coverage || !(Number(coverage.gap_seconds) > 60)) {
+        notice.hidden = true;
+        return;
+    }
+    byId('coverageSummary').innerHTML =
+        `笔记停在 <b>${escapeHtml(coverage.note_end || '')}</b>，` +
+        `视频到 <b>${escapeHtml(coverage.coverage_end || '')}</b>：` +
+        `缺 <b>${formatGapLabel(coverage.gap_seconds)}</b>，` +
+        `原文 ${coverage.missing_segments} 句 / 约 ${coverage.missing_characters} 字。`;
+    if (coverage.patch_available) {
+        const wait = Math.max(1, Math.round(Number(coverage.patch_timeout_seconds || 240) / 60));
+        byId('coverageCost').textContent =
+            '补写会：再调用一次模型；' +
+            `输出额度最多约 ${coverage.patch_max_tokens} token；最长等待 ${wait} 分钟；` +
+            (coverage.covers_full_gap
+                ? '本次可以补完整段缺口'
+                : '缺口较大，只能补写最靠近结尾的一段，中间仍会缺') +
+            '；内容追加在笔记末尾，可能与已有内容重复，并会覆盖知识库里已归档的那一份。';
+    } else {
+        byId('coverageCost').textContent =
+            '不提供补写：' +
+            (coverage.patch_blocked_reason || '缺口不适合补写') +
+            '。可以改用「详细复原」风格重新生成。';
+    }
+    byId('coverageActions').hidden = !coverage.patch_available;
+    byId('patchTailBtn').disabled = false;
+    byId('patchTailStatus').textContent = '';
+    notice.hidden = false;
+}
+
+async function patchMissingTail() {
+    const button = byId('patchTailBtn');
+    const status = byId('patchTailStatus');
+    if (!button || !currentTaskId) return;
+    const modelConfig = getSelectedModelConfig();
+    if (!modelConfig) {
+        if (status) status.textContent = '请先在左侧选择模型';
+        return;
+    }
+    button.disabled = true;
+    if (status) status.textContent = '正在补写，最多等 4 分钟…';
+    const typedKey = typedApiKey();
+    const llmConfig = {
+        model_type: modelConfig.provider,
+        base_url: modelConfig.baseUrl,
+        model: modelConfig.model
+    };
+    if (typedKey) llmConfig.api_key = typedKey;
+    try {
+        const response = await fetch(
+            `${API_BASE}/task/${encodeURIComponent(currentTaskId)}/patch-tail`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ llm_config: llmConfig })
+            }
+        );
+        const data = await readResponse(response, '补写结尾失败');
+        currentMarkdown = data.markdown;
+        currentHtml = replaceImagePaths(data.markdown);
+        byId('markdownContent').innerHTML = renderMarkdown(currentHtml);
+        renderCoverageNotice({ coverage: data.coverage });
+        addLog(data.log || '已补写笔记结尾', 'info');
+        showToast(data.archived_overwritten ? '补写完成，归档文件已更新' : '补写完成');
+    } catch (error) {
+        if (status) status.textContent = error.message;
+        button.disabled = false;
+    }
 }
 
 async function fetchTranscriptText() {

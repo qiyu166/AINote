@@ -40,7 +40,8 @@ python "<本技能目录>/scripts/video_note.py" "<视频链接或本地文件�
 脚本会自动：探测服务端口 → （本地文件先上传）→ 提交任务 → 轮询进度（实时打印运行日志）→ 输出完整 Markdown。
 
 - `--transcript-only`：只做到转录为止，不调用大模型；此模式**默认复用同链接已有的转录**（秒回），加 `--no-reuse` 才强制重新转写
-- `--style`：`detailed`（翔实+点评，默认）/ `faithful`（忠实复原）/ `concise`（精简摘要）
+- `--style`：`detailed`（翔实+点评，默认）/ `faithful`（忠实复原）/ `concise`（精简摘要）/ `keypoints`（要点提炼：只列核心观点与结论清单，适配只看重点）
+- `--content-type`：`general`（默认，通用）/ `tutorial`（教程：前置准备→操作步骤→易错点→验证）/ `knowledge`（知识：概念→原理→关系→边界）/ `learning`（学习：目标→知识点→记忆线索→自测）
 - `--wait`：最长等待秒数，默认 1800；长视频（>30 分钟）建议加大
 - `--out <path.md>`：把结果写入文件（不加则打印到 stdout）
 - 服务未运行、API Key 未配置、任务失败时都会给出明确的中文提示，按提示向用户询问即可
